@@ -24,11 +24,14 @@ class SettingsError(ValueError):
 
 def _path() -> Path:
     directory = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(directory) / "sysmon" / "config.json"
+    return Path(directory) / "vital" / "config.json"
 
 
 def load_language() -> str:
     path = _path()
+    # Keep the language chosen before the sysmon → vital rename.
+    if not path.exists():
+        path = path.parent.parent / "sysmon" / "config.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:

@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sysmon-tui"
-version = "0.1.0"
+name = "vital-tui"
+version = "0.2.0"
 description = "Linux 終端機系統資源監視器"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
+vital = "sysmon.cli:main"
 sysmon = "sysmon.cli:main"
 
 [project.urls]

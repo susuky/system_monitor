@@ -365,6 +365,27 @@ class Collector:
         self._previous_network, self._network_time = counters, now
         return sorted(rows, key=lambda row: (not row["up"], row["name"] == "lo", row["name"]))
 
+    def _gpu_process_utilization(self, handle: Any, pids: set[int]) -> dict[int, float]:
+        if not pids:
+            return {}
+        # NVML keeps its own sampled history. Re-read the recent window so
+        # sub-second refreshes reuse a fresh sample without retaining stale PIDs.
+        oldest = time.time_ns() // 1000 - 2_000_000
+        try:
+            samples = self._nvml.nvmlDeviceGetProcessUtilization(handle, oldest)
+        except self._nvml.NVMLError:
+            # NotFound means no samples; NotSupported includes MIG devices.
+            # Neither supplies a measured 0% for a particular process.
+            return {}
+        now = time.time_ns() // 1000
+        latest = {}
+        for sample in samples:
+            if (sample.pid in pids and oldest < sample.timeStamp <= now
+                    and 0 <= sample.smUtil <= 100
+                    and (sample.pid not in latest or sample.timeStamp > latest[sample.pid].timeStamp)):
+                latest[sample.pid] = sample
+        return {pid: float(sample.smUtil) for pid, sample in latest.items()}
+
     def _gpus(self, processes: list[dict]) -> tuple[list[dict], str]:
         nvml = self._nvml
         if nvml is None:
@@ -381,7 +402,7 @@ class Collector:
             return [], "無法讀取 NVIDIA GPU"
         if count == 0:
             return [], "未偵測到 NVIDIA GPU"
-        names = {row["pid"]: row["name"] for row in processes}
+        host_processes = {row["pid"]: row for row in processes}
         gpus, errors = [], []
         for index in range(count):
             handle = query(nvml.nvmlDeviceGetHandleByIndex, index)
@@ -396,8 +417,9 @@ class Collector:
             power = query(nvml.nvmlDeviceGetPowerUsage, handle)
             limit = query(nvml.nvmlDeviceGetEnforcedPowerLimit, handle)
             gpu_processes: dict[int, dict] = {}
-            for kind, function in (("C", nvml.nvmlDeviceGetComputeRunningProcesses),
-                                   ("G", nvml.nvmlDeviceGetGraphicsRunningProcesses)):
+            sources = (("C", nvml.nvmlDeviceGetComputeRunningProcesses),
+                       ("G", nvml.nvmlDeviceGetGraphicsRunningProcesses))
+            for kind, function in sources:
                 running = query(function, handle)
                 if running is None:
                     errors.append(f"GPU {index} 無法讀取 {kind} 程序資料")
@@ -407,15 +429,26 @@ class Collector:
                         used = None
                     if process.pid in gpu_processes:
                         row = gpu_processes[process.pid]
-                        row["type"] = "C+G"
+                        if kind not in row["type"]:
+                            row["type"] = "C+G"
                         if used is not None:
                             row["memory"] = max(row["memory"] or 0, used)
                     else:
-                        name = names.get(process.pid) or query(nvml.nvmlSystemGetProcessName, process.pid)
+                        host = host_processes.get(process.pid, {})
+                        name = host.get("name") or query(nvml.nvmlSystemGetProcessName, process.pid)
                         gpu_processes[process.pid] = {
                             "pid": process.pid, "name": _text(name) if name else "",
-                            "memory": used, "type": kind,
+                            "memory": used, "type": kind, "device": index,
+                            "user": host.get("user", ""), "cpu": host.get("cpu"),
+                            "host_memory": host.get("memory"), "command": host.get("command", ""),
                         }
+            process_usage = self._gpu_process_utilization(handle, set(gpu_processes))
+            for pid, row in gpu_processes.items():
+                row["gpu_utilization"] = process_usage.get(pid)
+                row["memory_percent"] = (
+                    row["memory"] / memory.total * 100
+                    if row["memory"] is not None and memory is not None and memory.total else None
+                )
             name = query(nvml.nvmlDeviceGetName, handle)
             uuid = query(nvml.nvmlDeviceGetUUID, handle)
             gpus.append({

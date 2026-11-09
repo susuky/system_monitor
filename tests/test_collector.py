@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -98,6 +99,64 @@ class CollectorTests(unittest.TestCase):
                 power, status = collector._cpu_power()
             self.assertAlmostEqual(power, 25e-6)
             self.assertEqual(status, "")
+
+    def test_gpu_utilization_requires_recent_valid_samples(self):
+        collector = Collector.__new__(Collector)
+        now = 10_000_000
+        samples = [
+            SimpleNamespace(pid=1, timeStamp=now - 800_000, smUtil=20),
+            SimpleNamespace(pid=1, timeStamp=now - 200_000, smUtil=37),
+            SimpleNamespace(pid=2, timeStamp=now - 200_000, smUtil=0),
+            SimpleNamespace(pid=3, timeStamp=now - 2_000_001, smUtil=80),
+            SimpleNamespace(pid=4, timeStamp=now - 200_000, smUtil=101),
+            SimpleNamespace(pid=5, timeStamp=now + 1, smUtil=40),
+            SimpleNamespace(pid=99, timeStamp=now - 200_000, smUtil=25),
+        ]
+        collector._nvml = SimpleNamespace(
+            NVMLError=RuntimeError, nvmlDeviceGetProcessUtilization=lambda handle, since: samples,
+        )
+        with patch("sysmon.collector.time.time_ns", return_value=now * 1000):
+            self.assertEqual(collector._gpu_process_utilization("gpu", {1, 2, 3, 4, 5}), {1: 37.0, 2: 0.0})
+            with patch.object(collector._nvml, "nvmlDeviceGetProcessUtilization", return_value=[]):
+                self.assertEqual(collector._gpu_process_utilization("gpu", {1}), {})
+            with patch.object(collector._nvml, "nvmlDeviceGetProcessUtilization", side_effect=RuntimeError("Not supported")):
+                self.assertEqual(collector._gpu_process_utilization("gpu", {1}), {})
+
+    def test_gpu_process_union_joins_host_details_and_preserves_unknowns(self):
+        collector = Collector.__new__(Collector)
+        collector._nvml = SimpleNamespace(
+            NVMLError=RuntimeError, nvmlMemory_v2=2, NVML_TEMPERATURE_GPU=0,
+            nvmlDeviceGetCount=lambda: 1, nvmlDeviceGetHandleByIndex=lambda index: index,
+            nvmlDeviceGetMemoryInfo=lambda *args: SimpleNamespace(total=1000, used=120),
+            nvmlDeviceGetUtilizationRates=lambda handle: SimpleNamespace(gpu=25),
+            nvmlDeviceGetPowerUsage=lambda handle: 50000,
+            nvmlDeviceGetEnforcedPowerLimit=lambda handle: 100000,
+            nvmlDeviceGetComputeRunningProcesses=lambda handle: [
+                SimpleNamespace(pid=1, usedGpuMemory=100), SimpleNamespace(pid=2, usedGpuMemory=None)],
+            nvmlDeviceGetGraphicsRunningProcesses=lambda handle: [
+                SimpleNamespace(pid=1, usedGpuMemory=120), SimpleNamespace(pid=3, usedGpuMemory=(1 << 64) - 1)],
+            nvmlSystemGetProcessName=lambda pid: f"gpu-process-{pid}",
+            nvmlDeviceGetName=lambda handle: "GPU", nvmlDeviceGetUUID=lambda handle: "GPU-test",
+            nvmlDeviceGetTemperature=lambda *args: 40, nvmlDeviceGetFanSpeed=lambda handle: 20,
+        )
+        host = {"pid": 1, "name": "python", "user": "demo", "cpu": 125.5,
+                "memory": 4096, "command": "python train.py"}
+        with patch.object(collector, "_gpu_process_utilization", return_value={1: 25.0, 2: 0.0}):
+            gpus, status = collector._gpus([host])
+        rows = {row["pid"]: row for row in gpus[0]["processes"]}
+        self.assertEqual(status, "")
+        self.assertEqual(set(rows), {1, 2, 3})
+        self.assertEqual(rows[1], {
+            "pid": 1, "name": "python", "type": "C+G", "device": 0,
+            "memory": 120, "memory_percent": 12.0, "gpu_utilization": 25.0,
+            "user": "demo", "cpu": 125.5, "host_memory": 4096, "command": "python train.py",
+        })
+        self.assertEqual(rows[2]["gpu_utilization"], 0.0)
+        self.assertIsNone(rows[2]["memory_percent"])
+        for field in ("gpu_utilization", "memory", "memory_percent", "cpu", "host_memory"):
+            self.assertIsNone(rows[3][field])
+        self.assertEqual(rows[3]["name"], "gpu-process-3")
+        self.assertEqual(rows[3]["command"], "")
 
 
 if __name__ == "__main__":

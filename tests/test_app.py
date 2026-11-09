@@ -1,6 +1,7 @@
 """Exercise the real collector and terminal interface together."""
 
 import asyncio
+from copy import deepcopy
 import os
 from pathlib import Path
 import time
@@ -16,6 +17,7 @@ from textual.widgets import Checkbox, ContentSwitcher, DataTable, Input, Tab
 
 from sysmon.app import SystemMonitorApp
 from sysmon.settings import load_language
+from scripts.capture_demo import DemoApp, demo_snapshot
 
 
 def save_screenshot(app, name, directory):
@@ -35,6 +37,64 @@ def save_screenshot(app, name, directory):
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gpu_process_columns_selection_and_narrow_scrolling(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(160, 44)) as pilot:
+            snapshot = demo_snapshot()
+            second = deepcopy(snapshot["gpus"][0])
+            second["index"] = 1
+            second["processes"] = [second["processes"][0]]
+            long_command = "python other-gpu.py " + "--parameter value " * 20 + "END_MARKER"
+            second["processes"][0].update(device=1, gpu_utilization=99, command=long_command)
+            snapshot["gpus"].append(second)
+            app.accept_snapshot(snapshot)
+            await pilot.press("4")
+            await pilot.pause()
+            table = app.query_one("#gpu-processes", DataTable)
+            self.assertEqual(table.row_count, 4)
+            self.assertGreater(table.columns[next(key for key in table.columns if key.value == "command")].width, 24)
+            self.assertEqual(table.max_scroll_x, 0)
+            self.assertEqual([str(c.label) for c in table.columns.values()],
+                             ["PID", "User", "Dev", "Type", "GPU%", "GPU memory", "CPU%", "Host memory", "Command"])
+            self.assertEqual(table.get_row_index("1:4102"), 0)
+            row = [str(value) for value in table.get_row("0:4102")]
+            self.assertEqual(row[1:6], ["demo", "0", "Compute", "72", "16.0 GiB 67%"])
+            self.assertEqual(row[7], "12.0 GiB")
+            self.assertEqual(str(table.get_row("0:4407")[3]), "Graphics")
+            table.move_cursor(row=table.get_row_index("1:4102"))
+            await pilot.pause()
+            self.assertIn("python other-gpu.py", str(app.query_one("#gpu-command").content))
+            second["processes"][0]["gpu_utilization"] = None
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(str(table.get_row("1:4102")[4]), "—")
+            self.assertEqual(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value, "1:4102")
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            self.assertGreater(table.size.height, 3)
+            self.assertGreater(table.max_scroll_x, 0)
+            self.assertEqual(table.frozen_columns, 1)
+            command_scroll = app.query_one("#gpu-command-scroll")
+            self.assertLessEqual(command_scroll.region.bottom, app.query_one("#gpu").region.bottom)
+            await pilot.press("right", "right", "right")
+            await pilot.pause()
+            self.assertGreater(table.scroll_x, 0)
+            self.assertIn("python other-gpu.py", str(app.query_one("#gpu-command").content))
+            await pilot.press("tab")
+            self.assertEqual(app.focused.id, "gpu-command-scroll")
+            await pilot.press("end")
+            await pilot.pause(1.1)
+            self.assertGreater(command_scroll.scroll_y, 0)
+            self.assertEqual(command_scroll.scroll_y, command_scroll.max_scroll_y)
+            self.assertIn("END_MARKER", app.export_screenshot())
+            snapshot["gpus"].clear()
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(table.row_count, 0)
+            self.assertFalse(table.display)
+            self.assertEqual(str(app.query_one("#gpu-command").content), "No GPU processes")
+            await pilot.press("ctrl+c")
+
     async def test_language_layout_and_live_viewport(self):
         with tempfile.TemporaryDirectory(prefix="sysmon-language-") as directory, patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}):
             app = SystemMonitorApp(interval=0.3, language="en")

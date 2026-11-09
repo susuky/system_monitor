@@ -50,13 +50,13 @@ def demo_snapshot():
         (4407, "browser", 24, 2 * GIB, "sleeping", 24, "browser"),
         (4501, "code", 12, 1024 * MIB, "sleeping", 18, "code demo-project"),
         (4603, "rsync", 7, 64 * MIB, "running", 1, "rsync -a assets/ /data/assets/"),
-        (4702, "sysmon", 2, 48 * MIB, "running", 2, "sysmon"),
+        (4702, "vital", 2, 48 * MIB, "running", 2, "vital"),
         (4800, "terminal", 2, 96 * MIB, "sleeping", 4, "terminal"),
         (4901, "shell", 1, 12 * MIB, "sleeping", 1, "bash"),
         (4902, "ssh-agent", 1, 8 * MIB, "sleeping", 1, "ssh-agent"),
         (4903, "systemd", 0, 16 * MIB, "sleeping", 1, "systemd --user"),
     ]
-    return {
+    snapshot = {
         "timestamp": datetime(2026, 1, 1, 14, 32, 8, tzinfo=timezone.utc).timestamp(),
         "hostname": "workstation", "uptime": 3 * 86400 + 9 * 3600 + 18 * 60,
         "cpu": {
@@ -100,8 +100,9 @@ def demo_snapshot():
             "temperature": 64.0, "power_watts": 216.0, "power_limit_watts": 300.0,
             "fan_percent": 48.0,
             "processes": [
-                {"pid": 4102, "name": "python", "memory": 16 * GIB, "type": "C"},
-                {"pid": 4120, "name": "ffmpeg", "memory": 2 * GIB, "type": "C"},
+                {"pid": 4102, "name": "python", "memory": 16 * GIB, "type": "C", "gpu_utilization": 72},
+                {"pid": 4120, "name": "ffmpeg", "memory": 1792 * MIB, "type": "C", "gpu_utilization": 4},
+                {"pid": 4407, "name": "browser", "memory": 256 * MIB, "type": "G", "gpu_utilization": 0},
             ],
         }],
         "gpu_status": "",
@@ -114,6 +115,14 @@ def demo_snapshot():
             "topology": [{"cpu": cpu, "core": cpu % 24, "socket": 0, "node": 0} for cpu in range(48)],
         },
     }
+    by_pid = {p["pid"]: p for p in snapshot["processes"]}
+    for gpu in snapshot["gpus"]:
+        for process in gpu["processes"]:
+            host = by_pid[process["pid"]]
+            process.update({"user": host["user"], "device": gpu["index"], "cpu": host["cpu"],
+                            "host_memory": host["memory"], "command": host["command"],
+                            "memory_percent": process["memory"] / gpu["memory_total"] * 100})
+    return snapshot
 
 
 class DemoApp(SystemMonitorApp):
@@ -121,8 +130,8 @@ class DemoApp(SystemMonitorApp):
         """Disable the worker before on_mount can start a real Collector."""
 
 
-def save_svg(app, language):
-    path = app.save_screenshot(f"overview-{language}.svg", ROOT / "docs/images")
+def save_svg(app, language, page="overview"):
+    path = app.save_screenshot(f"{page}-{language}.svg", ROOT / "docs/images")
     tree = ET.parse(path)
     for element in tree.iter():
         if element.tag.endswith("text") and "textLength" in element.attrib:
@@ -157,6 +166,9 @@ async def capture():
             assert app.snapshot["hostname"] == "workstation"
             assert all(process["user"] == "demo" for process in app.snapshot["processes"])
             print(save_svg(app, language))
+            await pilot.press("4")
+            await pilot.pause()
+            print(save_svg(app, language, "gpu"))
 
 
 if __name__ == "__main__":

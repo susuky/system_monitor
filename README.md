@@ -1,4 +1,4 @@
-# Sysmon
+# Vital
 
 Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`lscpu` 與 `mpstat` 常看的資訊放在同一個介面。適合需要同時追蹤多核心 CPU、NVIDIA GPU 與程序負載的工作環境。
 
@@ -6,14 +6,18 @@ Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`l
 
 ## 介面
 
-![Sysmon 繁體中文概覽](docs/images/overview-zh-TW.png)
+![Vital 繁體中文概覽](docs/images/overview-zh-TW.png)
 
-概覽同時顯示逐核心負載、記憶體、GPU、程序與磁碟。上圖由實際程式以範例資料擷取，未包含任何實機帳號、主機名稱或程序指令。
+概覽同時顯示逐核心負載、記憶體、GPU、程序與磁碟。文件中的介面圖由實際程式以範例資料擷取。
+
+![Vital GPU 程序](docs/images/gpu-zh-TW.png)
 
 <details>
 <summary>English interface</summary>
 
-![Sysmon English overview](docs/images/overview-en.png)
+![Vital English overview](docs/images/overview-en.png)
+
+![Vital GPU processes](docs/images/gpu-en.png)
 
 </details>
 
@@ -22,7 +26,7 @@ Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`l
 | 概覽 | CPU／記憶體／GPU／網路摘要、逐核心負載、程序搜尋與磁碟容量 |
 | CPU | 每個邏輯核心的使用率、user、sys、iowait、idle，以及 Core／Socket／NUMA 拓撲 |
 | 程序 | 依 CPU 或記憶體排序，搜尋名稱、完整指令、PID 或使用者 |
-| GPU | 各張 NVIDIA GPU 的用率、顯存、溫度、功率、風扇與 GPU 程序 |
+| GPU | 各張 NVIDIA GPU 的使用率、顯存、溫度、功率、風扇，以及運算／圖形程序的 GPU%、CPU%、顯存與主記憶體 |
 | 磁碟／網路 | 掛載點容量、磁碟讀寫速率與 IOPS、網路介面流量 |
 | 硬體 | CPU 型號、快取、系統版本，以及記憶體、Cache 與 Swap 明細 |
 
@@ -44,13 +48,13 @@ cd system_monitor
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 source .venv/bin/activate
-sysmon
+vital
 ```
 
 不啟用虛擬環境時，可在專案目錄執行：
 
 ```bash
-./sysmon.sh
+./vital.sh
 ```
 
 若習慣使用 `uv`，可用以下兩行取代建立環境與安裝步驟：
@@ -60,26 +64,26 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-### 在任意目錄執行 `sysmon`
+### 在任意目錄執行 `vital`
 
 在專案目錄建立帳號專用的指令連結：
 
 ```bash
 mkdir -p "$HOME/.local/bin"
-ln -s "$PWD/.venv/bin/sysmon" "$HOME/.local/bin/sysmon"
+ln -s "$PWD/.venv/bin/vital" "$HOME/.local/bin/vital"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-將最後一行放進 shell 啟動設定（例如 Bash 的 `~/.bashrc`），新終端機也能直接使用 `sysmon`。一般監看不需要 root 權限。
+將最後一行放進 shell 啟動設定（例如 Bash 的 `~/.bashrc`），新終端機也能直接使用 `vital`。一般監看不需要 root 權限。
 
 ### 語言
 
 ```bash
-sysmon --lang en
-sysmon --lang zh-TW
+vital --lang en
+vital --lang zh-TW
 ```
 
-預設為繁體中文。也可在介面按 `l` 切換；兩種方式都會保存選擇。設定位於 `~/.config/sysmon/config.json`，或 `$XDG_CONFIG_HOME/sysmon/config.json`。命令說明與文字報表會跟著切換。
+預設為繁體中文。也可在介面按 `l` 切換；兩種方式都會保存選擇。設定位於 `~/.config/vital/config.json`，或 `$XDG_CONFIG_HOME/vital/config.json`。命令說明與文字報表會跟著切換。從舊版升級時會沿用 `~/.config/sysmon/config.json` 的語言選擇；舊的 `sysmon` 指令與 `./sysmon.sh` 仍可使用。
 
 ## 操作
 
@@ -93,19 +97,19 @@ sysmon --lang zh-TW
 | `b` | 核心依編號／使用率排序 |
 | `l` | 切換英文／繁中並保存 |
 | 方向鍵 | 移動表格選取位置 |
-| `q` | 離開 |
+| `Ctrl+C`／`q` | 離開；`Ctrl+C` 在搜尋框也會直接離開 |
 
-概覽與 CPU 頁面可勾選「>1%」篩選忙碌核心。程序總覽顯示前 100 筆；「程序」頁可查看全部符合條件的程序，以及選取項目的完整指令。
+概覽與 CPU 頁面可勾選「>1%」篩選忙碌核心。程序總覽顯示前 100 筆；「程序」頁可查看全部符合條件的程序，以及選取項目的完整指令。GPU 頁顯示各個運算與圖形程序，方向鍵可選取並查看完整指令；窄視窗可橫向捲動表格。
 
 ## 取樣與匯出
 
 ```bash
-sysmon --interval 0.5
-sysmon --once
-sysmon --interval 1 --samples 5
-sysmon --json
-sysmon --json -i 1 -n 5 > samples.ndjson
-sysmon --help
+vital --interval 0.5
+vital --once
+vital --interval 1 --samples 5
+vital --json
+vital --json -i 1 -n 5 > samples.ndjson
+vital --help
 ```
 
 `--once` 輸出一次資源摘要。`--samples` 會加上每個核心的 user、system、iowait、idle 與忙碌百分比，可對應 `mpstat 1 5` 的連續觀察方式。啟動後會先等待一個取樣間隔，以取得 CPU 用率與傳輸速率；最短間隔為 0.2 秒。
@@ -118,6 +122,7 @@ sysmon --help
 - Cache 包含可回收的核心快取（SReclaimable），Buffers 另列。
 - 程序 CPU 使用率以單一邏輯核心為 100%，多執行緒程序可超過 100%；整體 CPU 與各核心的忙碌百分比不含 idle、iowait。
 - CPU 溫度依硬體感測器提供；CPU 功率取自 Linux RAPL 封裝能耗差值。
+- GPU 程序的 GPU% 來自 NVML 最近的 SM 使用率樣本；沒有近期樣本或硬體不支援時顯示 `—`。顯存百分比為該程序占整張卡顯存總量的比例，主記憶體為 RSS。
 - 感測器不存在或讀取權限不足時顯示 `—`，JSON 為 `null`。CPU 頁會顯示功率讀取狀態。
 
 ## 開發與驗證

@@ -19,7 +19,16 @@ class SettingsTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, {"XDG_CONFIG_HOME": self.directory.name})
         self.environment.start()
         self.addCleanup(self.environment.stop)
-        self.path = Path(self.directory.name) / "sysmon" / "config.json"
+        self.path = Path(self.directory.name) / "vital" / "config.json"
+
+    def test_rename_preserves_old_language_until_new_settings_are_saved(self):
+        legacy = self.path.parent.parent / "sysmon" / "config.json"
+        legacy.parent.mkdir()
+        legacy.write_text('{"language":"en"}')
+        self.assertEqual(load_language(), "en")
+        save_language("zh-TW")
+        self.assertEqual(load_language(), "zh-TW")
+        self.assertEqual(json.loads(legacy.read_text()), {"language": "en"})
 
     def test_save_load_and_failed_write_preserves_previous_choice(self):
         self.assertEqual(load_language(), "zh-TW")

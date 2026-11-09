@@ -81,13 +81,13 @@ def _sample_count(value: str, language: str = DEFAULT_LANGUAGE) -> int:
 def _parser(language: str = DEFAULT_LANGUAGE) -> argparse.ArgumentParser:
     t = partial(_text, language)
     parser = _ArgumentParser(
-        language=language, prog="sysmon",
+        language=language, prog="vital",
         description=t("CPU、GPU、記憶體、磁碟與程序監視器", "CPU, GPU, memory, disk and process monitor"),
         add_help=False,
     )
     parser.add_argument("-h", "--help", action="help", help=t("顯示說明", "show help"))
     parser.add_argument(
-        "--version", action="version", version=f"sysmon {__version__}", help=t("顯示版本", "show version"),
+        "--version", action="version", version=f"vital {__version__}", help=t("顯示版本", "show version"),
     )
     parser.add_argument(
         "-i", "--interval", type=partial(_interval, language=language), default=1.0,
