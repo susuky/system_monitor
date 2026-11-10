@@ -37,6 +37,99 @@ def save_screenshot(app, name, directory):
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_paused_jetson_gpu_resizes_without_a_process_table(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(160, 44)) as pilot:
+            snapshot = demo_snapshot()
+            snapshot["gpus"][0].update(memory_shared=True, memory_used=None,
+                                       memory_total=None, processes=[], processes_supported=False)
+            snapshot["gpu_status"] = "Jetson GPU 程序資料不可用"
+            app.accept_snapshot(snapshot)
+            await pilot.press("4", "space")
+            self.assertTrue(app.paused)
+            self.assertFalse(app.query_one("#gpu-processes").display)
+            for width, height in ((80, 24), (160, 44), (80, 24)):
+                await pilot.resize_terminal(width, height)
+                await pilot.pause(.3)
+                header = app.query_one("#top-line")
+                details = app.query_one("#gpu-detail")
+                self.assertLessEqual(header.content.cell_len, header.content_size.width)
+                self.assertTrue(all(line.cell_len <= details.content_size.width
+                                    for line in details.content.split("\n")))
+                self.assertIn("Shared system RAM", details.content.plain)
+                self.assertEqual(app.snapshot["timestamp"], snapshot["timestamp"])
+            await pilot.press("q")
+
+    async def test_plain_table_matches_rich_cells_and_scrolled_viewport(self):
+        from rich.segment import Segment
+        from rich.style import Style
+        from rich.text import Text
+        from textual.app import App
+        from sysmon.widgets import PlainDataTable
+
+        class TableApp(App):
+            CSS = "PlainDataTable.tinted > .datatable--cursor {color: #11ee22; background: #ab12cd;}"
+
+            def compose(self):
+                yield PlainDataTable(id="table", fixed_columns=1, zebra_stripes=True, cursor_type="row")
+
+        def segments(lines):
+            return [list(Segment.simplify(line)) for line in lines]
+
+        app = TableApp()
+        async with app.run_test(size=(40, 12)) as pilot:
+            table = app.query_one(PlainDataTable)
+            table.add_column(Text("PID"), key="pid", width=6)
+            table.add_column(Text("使用者"), key="user", width=8)
+            table.add_column(Text("指令"), key="command", width=40)
+            for i in range(20):
+                table.add_row(Text(str(i)), Text("測試用戶"), Text("python 長指令.py " + "x" * 50), key=str(i))
+            table._show_hover_cursor = True
+            style = Style(color="white", bgcolor="#10151c")
+            for text in (Text("你e\u0301好🧑‍💻longtext"), Text("styled", style="bold red"),
+                         Text("longtext", overflow="ellipsis"), Text("first\nsecond")):
+                table.update_cell("0", "user", text)
+                for width in (3, 4, 7, 16):
+                    for cursor, hover in ((False, False), (True, False), (False, True), (True, True)):
+                        table._cell_render_cache.clear()
+                        expected = segments(DataTable._render_cell(table, 0, 1, style, width, cursor, hover))
+                        table._cell_render_cache.clear()
+                        self.assertEqual(segments(table._render_cell(0, 1, style, width, cursor, hover)), expected)
+            table.update_cell("0", "user", Text("測試用戶"))
+            await pilot.pause()
+            await pilot.click("#table", offset=(12, 3))
+            self.assertEqual(table.cursor_row, 2)
+            table.move_cursor(row=15)
+            table.scroll_to(x=15, animate=False, immediate=True)
+            await pilot.pause()
+            self.assertGreater(table.scroll_x, 0)
+            self.assertGreater(table.scroll_y, 0)
+            await pilot.hover("#table", offset=(12, 4))
+            await pilot.pause()
+            table.update_cell("15", "command", Text("changed 指令"))
+            table.sort("pid", key=lambda cell: -int(str(cell)))
+            await pilot.pause()
+            clicked_row = int(table.scroll_y) + 2
+            await pilot.click("#table", offset=(12, 3))
+            self.assertEqual(table.cursor_row, clicked_row)
+            self.assertEqual(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value, str(19 - clicked_row))
+            for state in ("focus", "blur", "css", "theme"):
+                if state == "blur":
+                    app.set_focus(None)
+                elif state == "css":
+                    table.focus()
+                    table.add_class("tinted")
+                elif state == "theme":
+                    app.theme = "textual-light"
+                await pilot.pause()
+                actual = segments(table.render_lines(table.size.region))
+                if state == "css":
+                    self.assertEqual(table.get_component_rich_style("datatable--cursor").bgcolor.name, "#ab12cd")
+                table._clear_caches()
+                with patch.object(table, "_render_cell", lambda *args, **kwargs: DataTable._render_cell(table, *args, **kwargs)):
+                    expected = segments(table.render_lines(table.size.region))
+                self.assertEqual(actual, expected, state)
+
     async def test_gpu_process_columns_selection_and_narrow_scrolling(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(160, 44)) as pilot:
@@ -48,6 +141,15 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             second["processes"][0].update(device=1, gpu_utilization=99, command=long_command)
             snapshot["gpus"].append(second)
             app.accept_snapshot(snapshot)
+            overview = app.query_one("#overview-processes", DataTable)
+            row_keys = list(overview.rows)
+            snapshot["processes"][1]["cpu"] = 9999
+            app.accept_snapshot(snapshot)
+            self.assertEqual(list(overview.rows), row_keys)
+            expected = sorted(snapshot["processes"], key=lambda process: (-process["cpu"], process["pid"]))
+            self.assertEqual([str(value) for value in overview.get_column("pid")], [str(process["pid"]) for process in expected])
+            self.assertEqual(str(overview.get_row_at(0)[2]), "9999.0")
+            self.assertIn("ffmpeg", str(overview.get_row_at(0)[5]))
             await pilot.press("4")
             await pilot.pause()
             table = app.query_one("#gpu-processes", DataTable)
@@ -73,7 +175,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertGreater(table.size.height, 3)
             self.assertGreater(table.max_scroll_x, 0)
-            self.assertEqual(table.frozen_columns, 1)
+            self.assertEqual(table.fixed_columns, 1)
             command_scroll = app.query_one("#gpu-command-scroll")
             self.assertLessEqual(command_scroll.region.bottom, app.query_one("#gpu").region.bottom)
             await pilot.press("right", "right", "right")
@@ -92,7 +194,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(table.row_count, 0)
             self.assertFalse(table.display)
-            self.assertEqual(str(app.query_one("#gpu-command").content), "No GPU processes")
+            self.assertEqual(str(app.query_one("#gpu-command").content), "No GPU processes reported")
             await pilot.press("ctrl+c")
 
     async def test_language_layout_and_live_viewport(self):
@@ -122,7 +224,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.query_one("#detail-core-busy", Checkbox).value)
                 app.query_one("#overview-search", Input).value = str(os.getpid())
                 await pilot.pause()
-                self.assertIn(str(os.getpid()), app.table_cache["overview-processes"])
+                self.assertIn(str(os.getpid()), [str(value) for value in table.get_column("pid")])
                 self.assertEqual(app.query_one("#search", Input).value, str(os.getpid()))
                 await pilot.press("escape", "space", "l")
                 self.assertTrue(app.paused)

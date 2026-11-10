@@ -22,6 +22,12 @@ CPU_FIELDS = (
     "guest", "guest_nice",
 )
 CpuTimes = namedtuple("CpuTimes", "user nice system idle iowait irq softirq steal guest guest_nice")
+PROCESS_STATES = {
+    "R": "running", "S": "sleeping", "D": "disk-sleep", "T": "stopped",
+    "t": "tracing-stop", "Z": "zombie", "X": "dead", "x": "dead",
+    "K": "wake-kill", "W": "waking", "I": "idle", "P": "parked",
+}
+CPU_SENSORS = {"k10temp", "coretemp", "cpu_thermal", "cpu-thermal", "cpu-therm", "zenpower"}
 PSEUDO_FILESYSTEMS = {
     "autofs", "binfmt_misc", "bpf", "cgroup", "cgroup2", "configfs",
     "debugfs", "devpts", "devtmpfs", "efivarfs", "fusectl", "fuse.portal",
@@ -72,6 +78,27 @@ def _cpu_usage(current: Any, previous: Any | None) -> tuple[float | None, dict]:
 
 def _text(value: Any) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+
+
+def _read_process_file(directory: int, name: str) -> bytes | None:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC, dir_fd=directory)
+    except PermissionError:
+        return None
+    try:
+        first = os.read(descriptor, 8192)
+        # stat/status are single seq_file records: a short first read contains
+        # the whole record. cmdline can return a partial remote-memory read.
+        if not first or (name != "cmdline" and len(first) < 8192):
+            return first
+        chunks = [first]
+        while chunk := os.read(descriptor, 8192):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except PermissionError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 def _hardware() -> dict:
@@ -129,10 +156,13 @@ class Collector:
 
     def __init__(self) -> None:
         self.hardware = _hardware()
+        kernel = self.hardware["kernel"].lower()
+        self._wsl = "microsoft" in kernel or "wsl" in kernel
         self.hostname = socket.gethostname()
         self._logical = psutil.cpu_count() or 1
         self._physical = psutil.cpu_count(logical=False)
         self._boot_time = psutil.boot_time()
+        self._clock_ticks = os.sysconf("SC_CLK_TCK")
         self._previous_cpu = None
         self._previous_cores: dict[int, CpuTimes] = {}
         self._previous_processes: dict[tuple, tuple[float, float]] = {}
@@ -154,6 +184,17 @@ class Collector:
         self._init_gpu()
 
     def _init_gpu(self) -> None:
+        self._jetson_gpu = next(Path("/sys/class/devfreq").glob("*.ga10b"), None)
+        self._jetson_temperature = None
+        if self._jetson_gpu is not None:
+            for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+                try:
+                    if (zone / "type").read_text().strip() == "GPU-therm":
+                        self._jetson_temperature = zone / "temp"
+                        break
+                except OSError:
+                    continue
+            return
         try:
             import pynvml
         except ImportError:
@@ -211,16 +252,48 @@ class Collector:
 
     @staticmethod
     def _cpu_temperature() -> float | None:
-        try:
-            groups = psutil.sensors_temperatures()
-        except (AttributeError, OSError):
-            return None
         readings = []
-        for name, sensors in groups.items():
-            if name.lower() not in {"k10temp", "coretemp", "cpu_thermal", "cpu-thermal", "zenpower"}:
+        paths = list(Path("/sys/class/hwmon").glob("hwmon*/name"))
+        paths.extend(Path("/sys/class/hwmon").glob("hwmon*/device/name"))
+        paths.extend(Path("/sys/devices/platform").glob("coretemp.*/hwmon/hwmon*/name"))
+        seen = set()
+        for name in paths:
+            try:
+                if name.read_text().strip().lower() not in CPU_SENSORS:
+                    continue
+                directory = name.parent.resolve()
+                if directory in seen:
+                    continue
+                seen.add(directory)
+                sensors, packages = [], []
+                for sensor in directory.glob("temp*_input"):
+                    try:
+                        label = sensor.with_name(sensor.name.replace("_input", "_label")).read_text().strip()
+                    except OSError:
+                        label = ""
+                    sensors.append(sensor)
+                    if label in {"Tctl", "Tdie"} or label.startswith("Package"):
+                        packages.append(sensor)
+                # Only read CPU package values, not other devices or limits.
+                values = []
+                for candidates in (packages, sensors):
+                    for sensor in candidates:
+                        try:
+                            values.append(float(sensor.read_text()) / 1000)
+                        except (OSError, ValueError):
+                            continue
+                    if values:
+                        break
+                readings.extend(values)
+            except OSError:
                 continue
-            package = [s.current for s in sensors if s.label in {"Tctl", "Tdie"} or s.label.startswith("Package")]
-            readings.extend(package or [s.current for s in sensors])
+        if not readings:
+            for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+                try:
+                    if (zone / "type").read_text().strip().lower() in CPU_SENSORS:
+                        readings.append(float((zone / "temp").read_text()) / 1000)
+                except (OSError, ValueError):
+                    continue
         return max(readings) if readings else None
 
     def _cpu(self) -> dict:
@@ -263,40 +336,77 @@ class Collector:
 
     def _processes(self) -> list[dict]:
         rows, current, users = [], {}, {}
-        attributes = (
-            "pid", "name", "uids", "status", "cpu_times", "memory_info",
-            "num_threads", "cmdline", "create_time",
-        )
-        for process in psutil.process_iter(attributes, ad_value=None):
-            info = process.info
-            # process_iter caches Process objects; reject a PID reused since
-            # that object's original creation time before computing deltas.
-            if not process.is_running():
-                continue
-            stamp = time.monotonic()
-            identity = (info["pid"], info["create_time"])
-            user = ""
-            if info["uids"] is not None:
-                uid = info["uids"].real
-                if uid not in users:
-                    try:
-                        users[uid] = pwd.getpwuid(uid).pw_name
-                    except KeyError:
-                        users[uid] = str(uid)
-                user = users[uid]
-            cpu = None
-            if info["cpu_times"] is not None and info["create_time"] is not None:
-                cpu_time = info["cpu_times"].user + info["cpu_times"].system
-                previous = self._previous_processes.get(identity)
-                if previous is not None and stamp > previous[0]:
-                    cpu = max(0.0, (cpu_time - previous[1]) / (stamp - previous[0]) * 100)
-                current[identity] = stamp, cpu_time
-            rows.append({
-                "pid": info["pid"], "name": info["name"] or "",
-                "user": user, "status": info["status"] or "",
-                "cpu": cpu, "memory": info["memory_info"].rss if info["memory_info"] else None,
-                "threads": info["num_threads"], "command": " ".join(info["cmdline"] or []),
-            })
+        with os.scandir(psutil.PROCFS_PATH) as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                row = {"pid": pid, "name": "", "user": "", "status": "",
+                       "cpu": None, "memory": None, "threads": None, "command": ""}
+                try:
+                    # A proc directory FD stays bound to this process even if
+                    # its PID is reused while reading the remaining files.
+                    directory = os.open(entry.path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                except PermissionError:
+                    rows.append(row)
+                    continue
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                try:
+                    stat = _read_process_file(directory, "stat")
+                    # comm can contain spaces, newlines and closing parentheses.
+                    end = stat.rfind(b")") if stat else 0
+                    fields = stat[end + 2:].split() if stat else []
+                    status = _read_process_file(directory, "status")
+                    # PF_KTHREAD with no address space has an empty cmdline.
+                    kernel_thread = fields and int(fields[6]) & 0x00200000 and fields[20] == b"0"
+                    cmdline = None if kernel_thread else _read_process_file(directory, "cmdline")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                finally:
+                    os.close(directory)
+                stamp = time.monotonic()
+                if stat is not None:
+                    row["name"] = os.fsdecode(stat[stat.find(b"(") + 1:end])
+                    row["status"] = PROCESS_STATES.get(os.fsdecode(fields[0]), "?")
+                    row["threads"] = int(fields[17])
+                    identity = (pid, int(fields[19]))
+                    cpu_time = (int(fields[11]) + int(fields[12])) / self._clock_ticks
+                    previous = self._previous_processes.get(identity)
+                    if previous is not None and stamp > previous[0]:
+                        row["cpu"] = max(0.0, (cpu_time - previous[1]) / (stamp - previous[0]) * 100)
+                    current[identity] = stamp, cpu_time
+                if status is not None:
+                    # VmRSS matches statm, while stat's RSS may use approximate
+                    # counters. Kernel threads and zombies have no VmRSS.
+                    row["memory"] = 0
+                    start = status.find(b"\nUid:")
+                    if start >= 0:
+                        end = status.find(b"\n", start + 1)
+                        uid = int(status[start + 5:end].split(None, 1)[0])
+                        if uid not in users:
+                            try:
+                                users[uid] = pwd.getpwuid(uid).pw_name
+                            except KeyError:
+                                users[uid] = str(uid)
+                        row["user"] = users[uid]
+                    start = status.find(b"\nVmRSS:")
+                    if start >= 0:
+                        end = status.find(b"\n", start + 1)
+                        row["memory"] = int(status[start + 7:end].split(None, 1)[0]) * 1024
+                if cmdline:
+                    arguments = os.fsdecode(cmdline)
+                    separator = "\0" if arguments.endswith("\0") else " "
+                    if arguments.endswith(separator):
+                        arguments = arguments[:-1]
+                    arguments = arguments.split(separator)
+                    if len(arguments) == 1 and " " in arguments[0]:
+                        arguments = arguments[0].split(" ")
+                    row["command"] = " ".join(arguments)
+                    expanded = os.path.basename(arguments[0])
+                    if len(row["name"]) >= 15 and expanded.startswith(row["name"]):
+                        row["name"] = expanded
+                rows.append(row)
         self._previous_processes = current
         return rows
 
@@ -366,7 +476,9 @@ class Collector:
         return sorted(rows, key=lambda row: (not row["up"], row["name"] == "lo", row["name"]))
 
     def _gpu_process_utilization(self, handle: Any, pids: set[int]) -> dict[int, float]:
-        if not pids:
+        # WSL NVML utilization samples can carry Windows PIDs while running
+        # process lists carry Linux PIDs. A numeric match is not an identity.
+        if self._wsl or not pids:
             return {}
         # NVML keeps its own sampled history. Re-read the recent window so
         # sub-second refreshes reuse a fresh sample without retaining stale PIDs.
@@ -389,6 +501,8 @@ class Collector:
     def _gpus(self, processes: list[dict]) -> tuple[list[dict], str]:
         nvml = self._nvml
         if nvml is None:
+            if self._jetson_gpu is not None:
+                return self._jetson_gpus()
             return [], self._gpu_status
 
         def query(function: Any, *args: Any) -> Any:
@@ -463,7 +577,33 @@ class Collector:
                 "fan_percent": query(nvml.nvmlDeviceGetFanSpeed, handle),
                 "processes": sorted(gpu_processes.values(), key=lambda row: row["pid"]),
             })
+        if self._wsl and gpus:
+            errors.append("WSL 未提供完整 GPU 程序清單")
         return gpus, "；".join(errors)
+
+    def _jetson_gpus(self) -> tuple[list[dict], str]:
+        # Orin's nvgpu driver exposes load in per-mille, without NVML.
+        utilization, temperature = None, None
+        status = "Jetson GPU 程序資料不可用"
+        try:
+            load = int((self._jetson_gpu / "device/load").read_text())
+            if not 0 <= load <= 1000:
+                raise ValueError("Invalid GPU load")
+            utilization = load / 10
+        except (OSError, ValueError):
+            status += "；無法讀取 Jetson GPU 使用率"
+        if self._jetson_temperature is not None:
+            try:
+                temperature = int(self._jetson_temperature.read_text()) / 1000
+            except (OSError, ValueError):
+                pass
+        return [{
+            "index": 0, "name": "NVIDIA Orin GPU", "uuid": "",
+            "utilization": utilization, "temperature": temperature,
+            "memory_shared": True, "memory_used": None, "memory_total": None,
+            "power_watts": None, "power_limit_watts": None, "fan_percent": None,
+            "processes": [], "processes_supported": False,
+        }], status
 
     def sample(self) -> dict:
         timestamp = time.time()

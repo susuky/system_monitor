@@ -178,8 +178,10 @@ def print_snapshot(
         console.print(
             f"GPU {gpu['index']} · {gpu['name']}  {_number(gpu['utilization'], '%')}"
         )
+        gpu_memory = (t("共用系統 RAM", "Shared system RAM") if gpu.get("memory_shared") else
+                      f"VRAM {_bytes(gpu['memory_used'])} / {_bytes(gpu['memory_total'])}")
         console.print(
-            f"  VRAM {_bytes(gpu['memory_used'])} / {_bytes(gpu['memory_total'])}  "
+            f"  {gpu_memory}  "
             f"{_number(gpu['temperature'], ' °C')}  {_number(gpu['power_watts'], ' W')}"
         )
     if snapshot["gpu_status"]:
