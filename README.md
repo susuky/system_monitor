@@ -1,50 +1,52 @@
 # Vital
 
-Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`lscpu` 與 `mpstat` 常看的資訊放在同一個介面。適合需要同時追蹤多核心 CPU、NVIDIA GPU 與程序負載的工作環境。
+**English** | [繁體中文](README.zh-TW.md)
 
-預設每秒更新，提供繁體中文與英文介面，也能輸出文字報表或 JSON 快照。
+A Linux terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and network traffic. Vital brings the information you would normally check with `free -h`, `htop`, `nvtop`, `df -h`, `lscpu`, and `mpstat` into one view.
 
-## 介面
+It refreshes every second by default, supports English and Traditional Chinese, and can export text reports or JSON snapshots.
 
-![Vital 繁體中文概覽](docs/images/overview-zh-TW.png)
+## Interface
 
-概覽同時顯示逐核心負載、記憶體、GPU、程序與磁碟。文件中的介面圖由實際程式以範例資料擷取。
+![Vital overview in English](docs/images/overview-en.png)
 
-![Vital GPU 程序](docs/images/gpu-zh-TW.png)
+The overview shows per-core CPU load, memory, GPUs, processes, and disk capacity together. These screenshots were captured from the application using sample data.
+
+![Vital GPU processes in English](docs/images/gpu-en.png)
 
 <details>
-<summary>English interface</summary>
+<summary>Traditional Chinese interface</summary>
 
-![Vital English overview](docs/images/overview-en.png)
+![Vital overview in Traditional Chinese](docs/images/overview-zh-TW.png)
 
-![Vital GPU processes](docs/images/gpu-en.png)
+![Vital GPU processes in Traditional Chinese](docs/images/gpu-zh-TW.png)
 
 </details>
 
-| 分頁 | 內容 |
+| Tab | Contents |
 | --- | --- |
-| 概覽 | CPU／記憶體／GPU／網路摘要、逐核心負載、程序搜尋與磁碟容量 |
-| CPU | 每個邏輯核心的使用率、user、sys、iowait、idle，以及 Core／Socket／NUMA 拓撲 |
-| 程序 | 依 CPU 或記憶體排序，搜尋名稱、完整指令、PID 或使用者 |
-| GPU | 各張 NVIDIA GPU 的使用率、顯存、溫度、功率、風扇，以及運算／圖形程序的 GPU%、CPU%、顯存與主記憶體 |
-| 磁碟／網路 | 掛載點容量、磁碟讀寫速率與 IOPS、網路介面流量 |
-| 硬體 | CPU 型號、快取、系統版本，以及記憶體、Cache 與 Swap 明細 |
+| Overview | CPU, memory, GPU, and network summaries; per-core load; process search; disk capacity |
+| CPU | Usage, user, sys, iowait, and idle time for each logical core, plus core, socket, and NUMA topology |
+| Processes | Sort by CPU or memory; search by name, full command, PID, or user |
+| GPU | Usage, VRAM, temperature, power, and fan speed for each NVIDIA GPU; GPU%, CPU%, VRAM, and RAM for compute and graphics processes |
+| Disks / Network | Filesystem capacity, disk read/write rates and IOPS, and traffic for each network interface |
+| Hardware | CPU model, caches, OS version, and memory, cache, and swap details |
 
-寬視窗會把核心負載排列成多欄；窄視窗改成可捲動的直向布局。低於 32 行時收起頂部摘要，記憶體明細仍可在「硬體」頁查看。
+Wide terminals display core load in multiple columns. Narrow terminals use a scrollable vertical layout. The top summaries are hidden below 32 rows; memory details remain available in the Hardware tab.
 
 ## Getting Started
 
-### 環境需求
+### Requirements
 
-- Linux（x86_64／aarch64）或 WSL2、Python 3.10 以上，並具備 `venv` 與 `pip`。
-- 可顯示 Unicode 的終端機；繁中介面需要中文字型。
-- 獨立 NVIDIA GPU 透過驅動程式的 NVML 讀取；Jetson Orin（JetPack 5）直接讀取系統提供的 GPU 負載與溫度。
+- Linux (x86_64 or aarch64) or WSL2, with Python 3.10 or later, `venv`, and `pip`.
+- A terminal with Unicode support. The Traditional Chinese interface also needs a Chinese font.
+- Discrete NVIDIA GPUs are read through the driver's NVML library. Jetson Orin (JetPack 5) uses GPU load and temperature readings exposed by the system.
 
-WSL2 請在 Linux 發行版內安裝與執行；CPU、記憶體與程序數值來自 WSL 環境。NVIDIA GPU 透過 Windows 驅動程式提供的 NVML 讀取。WSL 的 GPU 程序清單可能不完整；逐程序 GPU 使用率顯示 `—`，避免混用 Windows 與 Linux PID。驅動程式未提供的逐程序顯存也顯示 `—`，JSON 為 `null`。參閱 [NVIDIA 的 WSL 支援範圍](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported)。
+On WSL2, install and run Vital inside your Linux distribution. CPU, memory, and process values describe the WSL environment. NVIDIA GPU data comes from NVML provided by the Windows driver. The GPU process list may be incomplete, and per-process GPU usage is shown as `—` to avoid mixing Windows and Linux PIDs. Per-process VRAM is also shown as `—` when the driver does not provide it, or `null` in JSON. See [NVIDIA's WSL support limitations](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported).
 
-Jetson Orin 的 CPU 與 GPU 共用系統 RAM，介面會顯示「共用系統 RAM」。目前的 sysfs 取樣不提供逐程序 GPU 資料、獨立顯存用量或單獨 GPU 功率；缺失數值在 JSON 中為 `null`。
+Jetson Orin's CPU and GPU share system RAM, so Vital displays `Shared system RAM`. The current sysfs source does not provide per-process GPU data, dedicated VRAM usage, or separate GPU power readings. Missing values are `null` in JSON.
 
-### 安裝與啟動
+### Install and Run
 
 ```bash
 git clone https://github.com/susuky/system_monitor.git
@@ -52,25 +54,25 @@ cd system_monitor
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 source .venv/bin/activate
-vital
+vital --lang en
 ```
 
-不啟用虛擬環境時，可在專案目錄執行：
+To run from the project directory without activating the virtual environment:
 
 ```bash
 ./vital.sh
 ```
 
-若習慣使用 `uv`，可用以下兩行取代建立環境與安裝步驟：
+If you use `uv`, replace the environment creation and installation steps with:
 
 ```bash
 uv venv .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-### 在任意目錄執行 `vital`
+### Run `vital` from Any Directory
 
-在專案目錄建立帳號專用的指令連結：
+From the project directory, create a command link for your account:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
@@ -78,34 +80,34 @@ ln -s "$PWD/.venv/bin/vital" "$HOME/.local/bin/vital"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-將最後一行放進 shell 啟動設定（例如 Bash 的 `~/.bashrc`），新終端機也能直接使用 `vital`。一般監看不需要 root 權限。
+Add the last line to your shell's startup file, such as `~/.bashrc` for Bash, to make `vital` available in new terminals. Normal monitoring does not require root privileges.
 
-### 語言
+### Language
 
 ```bash
 vital --lang en
 vital --lang zh-TW
 ```
 
-預設為繁體中文。也可在介面按 `l` 切換；兩種方式都會保存選擇。設定位於 `~/.config/vital/config.json`，或 `$XDG_CONFIG_HOME/vital/config.json`。命令說明與文字報表會跟著切換。從舊版升級時會沿用 `~/.config/sysmon/config.json` 的語言選擇；舊的 `sysmon` 指令與 `./sysmon.sh` 仍可使用。
+The default interface language is Traditional Chinese. You can also press `l` in the interface to switch languages. Both methods save your choice in `~/.config/vital/config.json`, or `$XDG_CONFIG_HOME/vital/config.json`. Command help and text reports use the selected language as well. When upgrading from an older version, Vital uses the language choice in `~/.config/sysmon/config.json`. The legacy `sysmon` command and `./sysmon.sh` launcher remain available.
 
-## 操作
+## Controls
 
-| 按鍵 | 功能 |
+| Key | Action |
 | --- | --- |
-| `1`～`6` | 切換分頁 |
-| `Space` | 暫停／恢復畫面更新 |
-| `/` | 搜尋程序 |
-| `Esc` | 清除搜尋並回到表格 |
-| `c`／`m` | 程序依 CPU／記憶體排序 |
-| `b` | 核心依編號／使用率排序 |
-| `l` | 切換英文／繁中並保存 |
-| 方向鍵 | 移動表格選取位置 |
-| `Ctrl+C`／`q` | 離開；`Ctrl+C` 在搜尋框也會直接離開 |
+| `1`–`6` | Switch tabs |
+| `Space` | Pause or resume display updates |
+| `/` | Search processes |
+| `Esc` | Clear the search and return to the table |
+| `c` / `m` | Sort processes by CPU / memory |
+| `b` | Sort cores by ID or usage |
+| `l` | Switch between English and Traditional Chinese and save the choice |
+| Arrow keys | Move the table selection |
+| `Ctrl+C` / `q` | Quit; `Ctrl+C` also quits while the search field is focused |
 
-概覽與 CPU 頁面可勾選「>1%」篩選忙碌核心。程序總覽顯示前 100 筆；「程序」頁可查看全部符合條件的程序，以及選取項目的完整指令。GPU 頁顯示各個運算與圖形程序，方向鍵可選取並查看完整指令；窄視窗可橫向捲動表格。
+Use the `>1%` checkbox in Overview or CPU to show only busy cores. Overview lists the top 100 processes. The Processes tab lists all matching processes and shows the full command for the selected row. The GPU tab lists compute and graphics processes; use the arrow keys to select a process and view its full command. Tables can scroll horizontally in narrow terminals.
 
-## 取樣與匯出
+## Sampling and Export
 
 ```bash
 vital --interval 0.5
@@ -116,46 +118,46 @@ vital --json -i 1 -n 5 > samples.ndjson
 vital --help
 ```
 
-`--once` 輸出一次資源摘要。`--samples` 會加上每個核心的 user、system、iowait、idle 與忙碌百分比，可對應 `mpstat 1 5` 的連續觀察方式。啟動後會先等待一個取樣間隔，以取得 CPU 用率與傳輸速率；最短間隔為 0.2 秒。
+`--once` prints one resource summary. `--samples` includes per-core user, system, iowait, idle, and busy percentages, similar to `mpstat 1 5`. Vital waits one sampling interval at startup to calculate CPU usage and transfer rates. The minimum interval is 0.2 seconds.
 
-`--json` 輸出完整快照，搭配 `--samples` 時每行一筆。JSON 欄位不受介面語言影響。快照包含主機名稱、程序指令、使用者與網路位址，分享前請先移除敏感內容。
+`--json` exports a complete snapshot. With `--samples`, it writes one JSON object per line. JSON field names are independent of the interface language. Snapshots include hostnames, process commands, users, and network addresses; remove sensitive information before sharing them.
 
-## 數值與感測器
+## Metrics and Sensors
 
-- 容量使用 KiB、MiB、GiB 等二進位單位；記憶體使用量為總量減可用量。
-- Cache 包含可回收的核心快取（SReclaimable），Buffers 另列。
-- 程序 CPU 使用率以單一邏輯核心為 100%，多執行緒程序可超過 100%；整體 CPU 與各核心的忙碌百分比不含 idle、iowait。
-- CPU 溫度依硬體感測器提供；CPU 功率取自 Linux RAPL 封裝能耗差值。
-- GPU 程序的 GPU% 來自 NVML 最近的 SM 使用率樣本；沒有近期樣本或硬體不支援時顯示 `—`。顯存百分比為該程序占整張卡顯存總量的比例，主記憶體為 RSS。
-- 感測器不存在或讀取權限不足時顯示 `—`，JSON 為 `null`。CPU 頁會顯示功率讀取狀態。
+- Sizes use binary units: KiB, MiB, and GiB. Used memory is total memory minus available memory.
+- Cache includes reclaimable kernel memory (`SReclaimable`); buffers are listed separately.
+- Process CPU usage treats one logical core as 100%, so multithreaded processes can exceed 100%. Overall and per-core busy percentages exclude idle and iowait.
+- CPU temperature comes from hardware sensors. CPU power is calculated from changes in Linux RAPL package energy counters.
+- Per-process GPU% comes from recent NVML SM utilization samples. It is shown as `—` when no recent sample is available or the hardware does not support it. VRAM percentage is the process's share of the GPU's total VRAM; process RAM is RSS.
+- Unavailable sensors and permission-restricted readings appear as `—`, or `null` in JSON. The CPU tab shows the status of power readings.
 
-## 效能量測
+## Profiling
 
-以下為 Vital 自身的資源用量，CPU 以單一邏輯核心為 100%。各平台皆使用真實 PTY、每秒更新與 160 × 44 終端機；每頁暖機 5 秒，Linux PC 與 Orin 量測 30 秒，WSL2 量測 20 秒。
+These measurements show Vital's own resource usage, with one logical core equal to 100% CPU. All platforms used a real PTY, a one-second refresh interval, and a 160 × 44 terminal. Each tab had a five-second warmup, followed by 30 seconds of measurement on Linux PC and Orin, or 20 seconds on WSL2.
 
-| 平台 | 程序數 | 概覽 CPU | 程序頁 CPU | RSS |
+| Platform | Processes | Overview CPU | Processes tab CPU | RSS |
 | --- | ---: | ---: | ---: | ---: |
-| Linux PC，48 執行緒 | 1,249 | 7.00% | 6.87% | 73.1–79.8 MiB |
-| Orin NX，8 核心 | 311 | 6.03% | 5.47% | 49.1–50.6 MiB |
-| Orin Nano，6 核心 | 300 | 9.77% | 8.60% | 48.7–50.3 MiB |
-| WSL2 PC，32 執行緒 | 67 | 1.95% | 1.45% | 76.3–76.7 MiB |
+| Linux PC, 48 threads | 1,249 | 7.00% | 6.87% | 73.1–79.8 MiB |
+| Orin NX, 8 cores | 311 | 6.03% | 5.47% | 49.1–50.6 MiB |
+| Orin Nano, 6 cores | 300 | 9.77% | 8.60% | 48.7–50.3 MiB |
+| WSL2 PC, 32 threads | 67 | 1.95% | 1.45% | 76.3–76.7 MiB |
 
-程序數、核心數、GPU 驅動、終端機尺寸與硬體速度會影響開銷。可在自己的環境執行相同量測：
+Overhead varies with process count, core count, GPU driver, terminal size, and hardware speed. To measure it on your system:
 
 ```bash
 .venv/bin/python scripts/benchmark.py
 ```
 
-腳本預設量測每頁 30 秒，可用 `--seconds 20` 調整；輸出包含資料採集的 CPU 時間、程序數、介面 CPU 用量與 RSS。
+The script measures each tab for 30 seconds by default; use `--seconds 20` to change the duration. Its output includes collector CPU time, process count, TUI CPU usage, and RSS.
 
-若要定位 CPU 花在哪裡，可在真實 PTY 分別量測 UI 與採集執行緒：
+To locate CPU bottlenecks, profile the UI and collector threads separately in a real PTY:
 
 ```bash
 .venv/bin/python scripts/profile_runtime.py --output artifacts/profile-ui --profile ui
 .venv/bin/python scripts/profile_runtime.py --output artifacts/profile-collector --profile collector
 ```
 
-上表使用未開 profiler 的 `benchmark.py`。Profiler 會增加開銷，適合定位瓶頸；Python 3.12 的 profiler 可能包含其他執行緒，腳本另以執行緒 CPU 時鐘記錄各部分時間。
+The table above uses `benchmark.py` without a profiler. Profiling adds overhead and is intended for locating bottlenecks. On Python 3.12, the profiler may include other threads; the script also measures each component with a thread CPU clock.
 
 ## Copyright
 
@@ -170,4 +172,4 @@ or use this software commercially without prior written permission
 from the copyright holder.
 ```
 
-完整聲明見 [LICENSE](LICENSE)。
+See [LICENSE](LICENSE) for the full notice.
