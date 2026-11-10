@@ -42,9 +42,7 @@ Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`l
 
 WSL2 請在 Linux 發行版內安裝與執行；CPU、記憶體與程序數值來自 WSL 環境。NVIDIA GPU 透過 Windows 驅動程式提供的 NVML 讀取。WSL 的 GPU 程序清單可能不完整；逐程序 GPU 使用率顯示 `—`，避免混用 Windows 與 Linux PID。驅動程式未提供的逐程序顯存也顯示 `—`，JSON 為 `null`。參閱 [NVIDIA 的 WSL 支援範圍](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported)。
 
-已在 x86_64 Linux、WSL2，以及 aarch64 的 Orin NX／Orin Nano 實機驗證。這兩台 Jetson 的系統 Python 為 3.8，測試使用獨立的 Python 3.11 環境；安裝 Vital 時仍需 Python 3.10 以上。
-
-Jetson Orin 的 CPU 與 GPU 共用系統 RAM，介面會顯示「共用系統 RAM」。目前的 sysfs 取樣不提供逐程序 GPU 資料、獨立顯存用量或單獨 GPU 功率；缺失數值在 JSON 中為 `null`。GPU 負載與溫度已對照同機的 [tegrastats](https://docs.nvidia.com/jetson/archives/r35.2.1/DeveloperGuide/text/AT/JetsonLinuxDevelopmentTools/TegrastatsUtility.html)。
+Jetson Orin 的 CPU 與 GPU 共用系統 RAM，介面會顯示「共用系統 RAM」。目前的 sysfs 取樣不提供逐程序 GPU 資料、獨立顯存用量或單獨 GPU 功率；缺失數值在 JSON 中為 `null`。
 
 ### 安裝與啟動
 
@@ -131,34 +129,24 @@ vital --help
 - GPU 程序的 GPU% 來自 NVML 最近的 SM 使用率樣本；沒有近期樣本或硬體不支援時顯示 `—`。顯存百分比為該程序占整張卡顯存總量的比例，主記憶體為 RSS。
 - 感測器不存在或讀取權限不足時顯示 `—`，JSON 為 `null`。CPU 頁會顯示功率讀取狀態。
 
-## 開發與驗證
+## 效能量測
 
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-```
+以下為 Vital 自身的資源用量，CPU 以單一邏輯核心為 100%。各平台皆使用真實 PTY、每秒更新與 160 × 44 終端機；每頁暖機 5 秒，Linux PC 與 Orin 量測 30 秒，WSL2 量測 20 秒。
 
-測試涵蓋本機取樣、程序 CPU 負載、核心缺號與熱插拔、RAPL 計數器回繞，以及介面的搜尋、排序、暫停、語言保存和視窗縮放。
+| 平台 | 程序數 | 概覽 CPU | 程序頁 CPU | RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Linux PC，48 執行緒 | 1,249 | 7.00% | 6.87% | 73.1–79.8 MiB |
+| Orin NX，8 核心 | 311 | 6.03% | 5.47% | 49.1–50.6 MiB |
+| Orin Nano，6 核心 | 300 | 9.77% | 8.60% | 48.7–50.3 MiB |
+| WSL2 PC，32 執行緒 | 67 | 1.95% | 1.45% | 76.3–76.7 MiB |
 
-量測監視器自身開銷：
+程序數、核心數、GPU 驅動、終端機尺寸與硬體速度會影響開銷。可在自己的環境執行相同量測：
 
 ```bash
 .venv/bin/python scripts/benchmark.py
 ```
 
-此腳本先量測資料採集，再於 160 × 44 的真實 PTY 中，以預設每秒更新分別執行概覽與程序頁 30 秒；CPU 百分比以單一邏輯核心為 100%。輸出同時包含程序數與記憶體使用量，方便比較不同主機與版本。
-
-2026-11-10 在 Linux PC、兩台 Orin 與 WSL2 比較本輪優化前後。兩版都每秒更新、使用 160 × 44 終端機；每頁先暖機，再分別量測舊版 20 秒、新版 30 秒，WSL2 則兩版各 20 秒。CPU 以單一邏輯核心為 100%，下表為「修改前 → 修改後」。
-
-| 主機 | 程序數（前／後） | 概覽 CPU | 程序頁 CPU | 新版 RSS |
-| --- | ---: | ---: | ---: | ---: |
-| Linux PC，48 執行緒 | 1,245／1,249 | 9.55% → 7.00% | 11.70% → 6.87% | 73.1–79.8 MiB |
-| Orin NX，8 核心 | 313／311 | 11.00% → 6.03% | 10.65% → 5.47% | 49.1–50.6 MiB |
-| Orin Nano，6 核心 | 300／300 | 18.55% → 9.77% | 17.70% → 8.60% | 48.7–50.3 MiB |
-| WSL2 PC，32 執行緒 | 67／67 | 4.10% → 1.95% | 3.15% → 1.45% | 76.3–76.7 MiB |
-
-每次採集的 CPU 時間分別從 61.99 → 51.18 ms、28.31 → 21.52 ms、44.15 → 34.73 ms、5.36 → 4.28 ms。程序資源數值、使用者與指令仍每秒重讀；只重用未變的顯示內容，減少表格繪製、整體重排與無用的感測器讀取。概覽按排名更新既有列，程序頁保留 PID 選取。
-
-這些主機仍有可量到的監控成本。程序數、核心數、GPU 驅動、終端機尺寸與硬體速度會影響結果；原版 Jetson Nano 尚未實測。
+腳本預設量測每頁 30 秒，可用 `--seconds 20` 調整；輸出包含資料採集的 CPU 時間、程序數、介面 CPU 用量與 RSS。
 
 若要定位 CPU 花在哪裡，可在真實 PTY 分別量測 UI 與採集執行緒：
 
@@ -167,13 +155,7 @@ vital --help
 .venv/bin/python scripts/profile_runtime.py --output artifacts/profile-collector --profile collector
 ```
 
-Profiler 會增加開銷，適合找瓶頸；對外比較 CPU 用量請使用未開 profiler 的 `benchmark.py`。Python 3.12 的 profiler 可能包含其他執行緒，腳本另以執行緒 CPU 時鐘記錄各部分時間。
-
-介面圖的範例資料與擷取腳本位於 [scripts/capture_demo.py](scripts/capture_demo.py)，執行後產生兩種語言的 SVG：
-
-```bash
-.venv/bin/python scripts/capture_demo.py
-```
+上表使用未開 profiler 的 `benchmark.py`。Profiler 會增加開銷，適合定位瓶頸；Python 3.12 的 profiler 可能包含其他執行緒，腳本另以執行緒 CPU 時鐘記錄各部分時間。
 
 ## Copyright
 
