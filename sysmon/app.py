@@ -157,6 +157,7 @@ class SystemMonitorApp(App):
     .panel { border: solid #455766; padding: 0 1; border-title-color: #52ded6; border-title-style: bold; }
     #cpu-panel, #process-panel { width: 2fr; }
     #gpu-panel, #filesystem-panel { width: 1fr; }
+    #gpu-panel { scrollbar-gutter: stable; }
     #cores, #gpu-overview, #filesystems, #cpu-detail-summary, #gpu-detail, #hardware-detail { height: auto; }
     #core-scroll { height: 1fr; overflow-x: hidden; }
     #core-footer { height: 2; border-top: solid #344657; color: #a3b5c5; }
@@ -616,9 +617,17 @@ class SystemMonitorApp(App):
                 elements.append(Text(""))
                 continue
             items = sorted(gpu["processes"], key=lambda p: (-(p.get("gpu_utilization") or 0), -(p["memory"] or 0), p["pid"]))[:8]
-            processes = text_table(("PID", self.t("程序", "Process"), "GPU%", self.t("顯存", "VRAM")),
-                                   [(str(p["pid"]), p["name"], number(p.get("gpu_utilization"), digits=0), size(p["memory"])) for p in items],
-                                   (7, max(4, width - 28), 5, 10)) if items else Text(self.t("未取得 GPU 程序", "No GPU processes reported"), style=MUTED)
+            headers = ["PID", self.t("程序", "Process"), "GPU%", "CPU%", self.t("顯存", "VRAM")]
+            rows = [[str(p["pid"]), p["name"], number(p.get("gpu_utilization"), digits=0),
+                     number(p.get("cpu")), size(p["memory"])] for p in items]
+            widths = (7, max(4, width - 37), 5, 7, 10)
+            if width < 41:
+                # Keep PID and usage visible when the side panel is narrow.
+                headers.pop(1)
+                for row in rows:
+                    row.pop(1)
+                widths = (7, 4, 6, max(7, width - 23))
+            processes = text_table(headers, rows, widths) if items else Text(self.t("未取得 GPU 程序", "No GPU processes reported"), style=MUTED)
             elements.extend([Text("─" * width, style="#344657"), processes])
             elements.append(Text(""))
         if self.snapshot["gpu_status"]:

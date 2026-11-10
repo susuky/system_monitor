@@ -82,6 +82,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 將最後一行放進 shell 啟動設定（例如 Bash 的 `~/.bashrc`），新終端機也能直接使用 `vital`。一般監看不需要 root 權限。
 
+若要用 `sudo vital` 讀取受限的 CPU 功耗計數器，建立一次系統指令連結：
+
+```bash
+sudo ln -s "$HOME/.local/bin/vital" /usr/local/bin/vital
+sudo vital
+```
+
 ### 語言
 
 ```bash

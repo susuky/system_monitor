@@ -82,6 +82,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Add the last line to your shell's startup file, such as `~/.bashrc` for Bash, to make `vital` available in new terminals. Normal monitoring does not require root privileges.
 
+To use `sudo vital` for restricted CPU power counters, create a system command link once:
+
+```bash
+sudo ln -s "$HOME/.local/bin/vital" /usr/local/bin/vital
+sudo vital
+```
+
 ### Language
 
 ```bash
