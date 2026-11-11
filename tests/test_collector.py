@@ -16,10 +16,14 @@ from unittest.mock import patch
 from sysmon.collector import Collector, CPU_FIELDS, _cpu_usage, _read_cpu_times
 
 
+linux_only = unittest.skipUnless(sys.platform.startswith("linux"), "uses Linux procfs or sysfs")
+
+
 class CollectorTests(unittest.TestCase):
     def test_live_counters_and_process_cpu(self):
         collector = Collector()
-        child = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+        # A Windows virtualenv launcher has its own PID and waits for Python.
+        child = subprocess.Popen([sys._base_executable, "-c", "while True: pass", "Vital 測試"])
         try:
             with ThreadPoolExecutor(max_workers=1) as worker:
                 first = worker.submit(collector.sample).result()
@@ -34,13 +38,21 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(len(second["cpu"]["core_ids"]), len(second["cpu"]["per_core"]))
             for row in second["cpu"]["per_core_times"]:
                 if row["idle"] is not None:
-                    self.assertAlmostEqual(sum(row.values()), 100)
+                    self.assertAlmostEqual(sum(value for value in row.values() if value is not None), 100)
             processes = {row["pid"]: row for row in second["processes"]}
             self.assertGreater(processes[child.pid]["cpu"], 0)
             self.assertGreater(processes[child.pid]["memory"], 0)
             memory = second["memory"]
             self.assertEqual(memory["used"] + memory["available"], memory["total"])
-            self.assertTrue(any(row["mountpoint"] == "/" for row in second["disks"]))
+            if sys.platform == "win32":
+                self.assertEqual(second["hardware"]["os"], "Windows")
+                self.assertIsNone(second["cpu"]["load"])
+                self.assertIsNone(second["cpu"]["times"]["iowait"])
+                self.assertNotIn(0, processes)
+                self.assertIn("Vital 測試", processes[child.pid]["command"])
+                self.assertTrue(any(Path(row["mountpoint"]).drive for row in second["disks"]))
+            else:
+                self.assertTrue(any(row["mountpoint"] == "/" for row in second["disks"]))
             self.assertTrue(all(row["recv_rate"] is None for row in first["network"]))
             for gpu in second["gpus"]:
                 pids = [row["pid"] for row in gpu["processes"]]
@@ -63,6 +75,7 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(sum(breakdown.values()), 100)
         self.assertIsNone(_cpu_usage(current, current)[0])
 
+    @linux_only
     def test_gapped_cpu_ids_and_hotplug_keep_their_own_counters(self):
         collector = Collector()
         try:
@@ -188,6 +201,7 @@ class CollectorTests(unittest.TestCase):
             self.assertIsNone(gpus[0]["temperature"])
             self.assertIn("無法讀取 Jetson GPU 使用率", status)
 
+    @linux_only
     def test_proc_fields_refresh_and_pid_reuse_with_nonstandard_clock(self):
         collector = Collector.__new__(Collector)
         collector._previous_processes = {}
@@ -229,6 +243,7 @@ class CollectorTests(unittest.TestCase):
                 (directory / "status").write_text("Name:\tnew\nUid:\t12346\t12346\t12346\t12346\n")
                 self.assertEqual(collector._processes()[0]["memory"], 0)
 
+    @linux_only
     def test_kernel_threads_skip_empty_cmdline_but_keep_user_and_cpu(self):
         collector = Collector.__new__(Collector)
         collector._previous_processes = {}
@@ -257,6 +272,7 @@ class CollectorTests(unittest.TestCase):
                 (directory / "cmdline").write_bytes(b"user-task\0--changed\0")
                 self.assertEqual(collector._processes()[0]["command"], "user-task --changed")
 
+    @linux_only
     def test_proc_directory_identity_permissions_and_disappearance(self):
         from sysmon.collector import _read_process_file
 

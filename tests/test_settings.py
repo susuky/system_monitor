@@ -80,7 +80,7 @@ class SettingsTests(unittest.TestCase):
     def run_cli(self, *args):
         return subprocess.run(
             [sys.executable, "-m", "sysmon", *args], cwd=Path(__file__).resolve().parents[1],
-            text=True, capture_output=True, timeout=15,
+            encoding="utf-8", capture_output=True, timeout=15,
         )
 
     def test_live_cli_language_persists_and_json_stays_machine_readable(self):

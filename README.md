@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
-A Linux terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and network traffic. Vital brings the information you would normally check with `free -h`, `htop`, `nvtop`, `df -h`, `lscpu`, and `mpstat` into one view.
+A terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and network traffic on Linux and Windows.
 
 It refreshes every second by default, supports English and Traditional Chinese, and can export text reports or JSON snapshots.
 
@@ -38,7 +38,7 @@ Wide terminals display core load in multiple columns. Narrow terminals use a scr
 
 ### Requirements
 
-- Linux (x86_64 or aarch64) or WSL2, with Python 3.10 or later, `venv`, and `pip`.
+- Linux (x86_64 or aarch64), WSL2, or native Windows (PowerShell 5.1 or 7), with Python 3.10 or later, `venv`, and `pip`.
 - A terminal with Unicode support. The Traditional Chinese interface also needs a Chinese font.
 - Discrete NVIDIA GPUs are read through the driver's NVML library. Jetson Orin (JetPack 5) uses GPU load and temperature readings exposed by the system.
 
@@ -46,7 +46,13 @@ On WSL2, install and run Vital inside your Linux distribution. CPU, memory, and 
 
 Jetson Orin's CPU and GPU share system RAM, so Vital displays `Shared system RAM`. The current sysfs source does not provide per-process GPU data, dedicated VRAM usage, or separate GPU power readings. Missing values are `null` in JSON.
 
-### Install and Run
+On Windows, Vital reads CPU topology and cache sizes, disk active time, and Intel CPU package power where Windows exposes a RAPL Energy Meter. The CPU tab shows DPC time, stored as `softirq` in JSON. Linux load average and iowait are `null` in Windows snapshots.
+
+Windows CPU utilization support covers a single processor group, typically up to 64 logical processors. [psutil processor group issue](https://github.com/giampaolo/psutil/issues/2972)
+
+Windows NVIDIA GPU readings use the driver's NVML library. On WDDM, Vital reads per-process dedicated memory from Windows and matches it to the NVIDIA adapter. Per-process GPU usage depends on the driver.
+
+### Install on Linux or WSL2
 
 ```bash
 git clone https://github.com/susuky/system_monitor.git
@@ -70,7 +76,33 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-### Run `vital` from Any Directory
+### Install on Windows
+
+From the project directory in PowerShell, run these commands with Python 3.10 or later.
+
+```powershell
+python -m venv .venv-windows
+.\.venv-windows\Scripts\python.exe -m pip install -e .
+.\.venv-windows\Scripts\vital.exe
+```
+
+To run `vital` from any PowerShell directory, copy `vital.exe` to a folder on your user `Path`. For desktop access, create a shortcut to the executable. Keep the project and virtual environment in their original locations.
+
+When your PowerShell execution policy allows local scripts, use `.\vital.ps1` to launch Vital or pipe a sample to PowerShell.
+
+```powershell
+.\vital.ps1
+.\vital.ps1 --once
+.\vital.ps1 --json | ConvertFrom-Json
+```
+
+### CPU temperature on Windows
+
+HWiNFO is optional and supplies the live CPU package temperature on Windows. Run HWiNFO in **Sensors-only** mode. In **Configure Sensors → HWiNFO Gadget**, enable **Enable reporting to Gadget**. Select **CPU Package** under the Intel CPU's DTS group or **CPU (Tctl/Tdie)** on AMD, then check **Report value in Gadget** for that sensor. [HWiNFO Gadget setup](https://docs.rainmeter.net/tips/hwinfo/)
+
+For background monitoring after sign-in, enable **Auto Start**, **Minimize Main Window on Startup**, and **Minimize Sensors on Startup** in HWiNFO's main settings. Turn off **Show Welcome Screen and Progress**. Run `vital --once` after sign-in to check the CPU temperature. [HWiNFO startup settings](https://www.hwinfo.com/forum/threads/auto-logging-to-a-specific-drive-and-csv.10469/)
+
+### Run `vital` from Any Directory on Linux or WSL2
 
 From the project directory, create a command link for your account:
 
@@ -132,13 +164,13 @@ vital --help
 ## Metrics and Sensors
 
 - Sizes use binary units: KiB, MiB, and GiB. Used memory is total memory minus available memory.
-- Cache includes reclaimable kernel memory (`SReclaimable`); buffers are listed separately.
+- On Linux, cache includes reclaimable kernel memory (`SReclaimable`); buffers are listed separately.
 - Process CPU usage treats one logical core as 100%, so multithreaded processes can exceed 100%. Overall and per-core busy percentages exclude idle and iowait.
-- CPU temperature comes from hardware sensors. CPU power is calculated from changes in Linux RAPL package energy counters.
+- On Linux, CPU temperature comes from hardware sensors. CPU power comes from changes in RAPL package energy counters.
 - Per-process GPU% comes from recent NVML SM utilization samples. It is shown as `—` when no recent sample is available or the hardware does not support it. VRAM percentage is the process's share of the GPU's total VRAM; process RAM is RSS.
 - Unavailable sensors and permission-restricted readings appear as `—`, or `null` in JSON. The CPU tab shows the status of power readings.
 
-## Profiling
+## Profiling on Linux and WSL2
 
 These measurements show Vital's own resource usage, with one logical core equal to 100% CPU. All platforms used a real PTY, a one-second refresh interval, and a 160 × 44 terminal. Each tab had a five-second warmup, followed by 30 seconds of measurement on Linux PC and Orin, or 20 seconds on WSL2.
 

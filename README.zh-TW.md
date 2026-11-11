@@ -2,7 +2,7 @@
 
 [English](README.md) | **繁體中文**
 
-Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`lscpu` 與 `mpstat` 常看的資訊放在同一個介面。適合需要同時追蹤多核心 CPU、NVIDIA GPU 與程序負載的工作環境。
+Vital 是 Linux 和 Windows 的終端機系統監視器，同時顯示 CPU、NVIDIA GPU、記憶體、程序、磁碟與網路流量。
 
 預設每秒更新，提供繁體中文與英文介面，也能輸出文字報表或 JSON 快照。
 
@@ -34,11 +34,11 @@ Linux 終端機系統監視器，把 `free -h`、`htop`、`nvtop`、`df -h`、`l
 
 寬視窗會把核心負載排列成多欄；窄視窗改成可捲動的直向布局。低於 32 行時收起頂部摘要，記憶體明細仍可在「硬體」頁查看。
 
-## Getting Started
+## 安裝與使用
 
 ### 環境需求
 
-- Linux（x86_64／aarch64）或 WSL2、Python 3.10 以上，並具備 `venv` 與 `pip`。
+- Linux（x86_64／aarch64）、WSL2 或原生 Windows（PowerShell 5.1 或 7）。需要 Python 3.10 以上及 `venv`、`pip`。
 - 可顯示 Unicode 的終端機；繁中介面需要中文字型。
 - 獨立 NVIDIA GPU 透過驅動程式的 NVML 讀取；Jetson Orin（JetPack 5）直接讀取系統提供的 GPU 負載與溫度。
 
@@ -46,7 +46,13 @@ WSL2 請在 Linux 發行版內安裝與執行；CPU、記憶體與程序數值�
 
 Jetson Orin 的 CPU 與 GPU 共用系統 RAM，介面會顯示「共用系統 RAM」。目前的 sysfs 取樣不提供逐程序 GPU 資料、獨立顯存用量或單獨 GPU 功率；缺失數值在 JSON 中為 `null`。
 
-### 安裝與啟動
+Windows 版會顯示 CPU 拓撲、快取容量及磁碟忙碌率。Windows 有提供 RAPL Energy Meter 時，也會顯示 Intel CPU 封裝功耗。CPU 頁的 DPC 時間對應 JSON 的 `softirq` 欄位。Windows 快照的 `load` 和 `iowait` 為 `null`。
+
+Windows 的 CPU 使用率支援單一處理器群組，通常最多 64 個邏輯處理器。[psutil 處理器群組問題](https://github.com/giampaolo/psutil/issues/2972)
+
+NVIDIA GPU 數值來自 Windows 驅動程式的 NVML。WDDM 模式下，Vital 從 Windows 讀取逐程序專用顯存並對應到 NVIDIA 顯示卡。逐程序 GPU 使用率取決於驅動程式。
+
+### 在 Linux 或 WSL2 安裝
 
 ```bash
 git clone https://github.com/susuky/system_monitor.git
@@ -70,7 +76,33 @@ uv venv .venv
 uv pip install --python .venv/bin/python -e .
 ```
 
-### 在任意目錄執行 `vital`
+### 在 Windows 安裝
+
+在專案目錄開啟 PowerShell，使用 Python 3.10 以上執行以下指令。
+
+```powershell
+python -m venv .venv-windows
+.\.venv-windows\Scripts\python.exe -m pip install -e .
+.\.venv-windows\Scripts\vital.exe
+```
+
+若要在 PowerShell 的任意目錄執行 `vital`，把 `vital.exe` 複製到使用者 `Path` 裡的資料夾。也可以建立指向該執行檔的桌面捷徑。專案與虛擬環境需留在安裝時的位置。
+
+PowerShell 執行原則允許本機指令碼時，也可以用 `.\vital.ps1` 啟動或將快照傳給 PowerShell。
+
+```powershell
+.\vital.ps1
+.\vital.ps1 --once
+.\vital.ps1 --json | ConvertFrom-Json
+```
+
+### Windows CPU 溫度
+
+HWiNFO 是選用元件，提供 Windows 的即時 CPU 封裝溫度。用 **Sensors-only** 模式開啟 HWiNFO，在 **Configure Sensors → HWiNFO Gadget** 勾選 **Enable reporting to Gadget**。Intel 選 CPU 的 DTS 群組下的 **CPU Package（CPU封裝）**，AMD 選 **CPU (Tctl/Tdie)**，再勾選該感測器的 **Report value in Gadget**。[HWiNFO Gadget 設定圖解](https://docs.rainmeter.net/tips/hwinfo/)
+
+若要在登入後於背景取樣，在 HWiNFO 主設定勾選 **Auto Start**、**Minimize Main Window on Startup** 和 **Minimize Sensors on Startup**，取消 **Show Welcome Screen and Progress**。登入後可執行 `vital --once` 確認 CPU 溫度。[HWiNFO 啟動設定](https://www.hwinfo.com/forum/threads/auto-logging-to-a-specific-drive-and-csv.10469/)
+
+### 在 Linux 或 WSL2 的任意目錄執行 `vital`
 
 在專案目錄建立帳號專用的指令連結：
 
@@ -132,13 +164,13 @@ vital --help
 ## 數值與感測器
 
 - 容量使用 KiB、MiB、GiB 等二進位單位；記憶體使用量為總量減可用量。
-- Cache 包含可回收的核心快取（SReclaimable），Buffers 另列。
+- Linux 的 Cache 包含可回收的核心快取（SReclaimable），Buffers 另列。
 - 程序 CPU 使用率以單一邏輯核心為 100%，多執行緒程序可超過 100%；整體 CPU 與各核心的忙碌百分比不含 idle、iowait。
-- CPU 溫度依硬體感測器提供；CPU 功率取自 Linux RAPL 封裝能耗差值。
+- Linux 的 CPU 溫度來自硬體感測器，CPU 功率由 RAPL 封裝能耗差值算出。
 - GPU 程序的 GPU% 來自 NVML 最近的 SM 使用率樣本；沒有近期樣本或硬體不支援時顯示 `—`。顯存百分比為該程序占整張卡顯存總量的比例，主記憶體為 RSS。
 - 感測器不存在或讀取權限不足時顯示 `—`，JSON 為 `null`。CPU 頁會顯示功率讀取狀態。
 
-## 效能量測
+## Linux 與 WSL2 效能量測
 
 以下為 Vital 自身的資源用量，CPU 以單一邏輯核心為 100%。各平台皆使用真實 PTY、每秒更新與 160 × 44 終端機；每頁暖機 5 秒，Linux PC 與 Orin 量測 30 秒，WSL2 量測 20 秒。
 

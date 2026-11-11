@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from functools import partial
+from io import TextIOWrapper
 import json
 import math
 import os
@@ -144,10 +145,8 @@ def print_snapshot(
     )
     if cpu["power_watts"] is None and cpu["power_status"]:
         console.print(translate_status(cpu["power_status"], language), style="dim")
-    console.print(
-        f"Load {' / '.join(f'{value:.2f}' for value in cpu['load'])}  "
-        f"{t('程序', 'Processes')} {len(snapshot['processes'])}"
-    )
+    load = f"Load {' / '.join(f'{value:.2f}' for value in cpu['load'])}  " if cpu["load"] else ""
+    console.print(f"{load}{t('程序', 'Processes')} {len(snapshot['processes'])}")
     console.print(
         f"RAM {_bytes(memory['used'])} / {_bytes(memory['total'])} "
         f"({_number(memory['percent'], '%')})  {t('可用', 'Available')} {_bytes(memory['available'])}"
@@ -239,6 +238,10 @@ def _sample(args: argparse.Namespace, language: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if isinstance(stream, TextIOWrapper) and not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     argv = sys.argv[1:] if argv is None else argv
     language_parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
     language_parser.add_argument("--lang", choices=LANGUAGES)

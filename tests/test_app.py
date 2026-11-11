@@ -222,10 +222,13 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(pilot.pause(), timeout=3)
                 self.assertFalse(app.busy_only)
                 self.assertFalse(app.query_one("#detail-core-busy", Checkbox).value)
-                app.query_one("#overview-search", Input).value = str(os.getpid())
-                await pilot.pause()
-                self.assertIn(str(os.getpid()), [str(value) for value in table.get_column("pid")])
-                self.assertEqual(app.query_one("#search", Input).value, str(os.getpid()))
+                pid = str(os.getpid())
+                field.value = pid
+                deadline = time.monotonic() + 3
+                while app.query_one("#search", Input).value != pid and time.monotonic() < deadline:
+                    await pilot.pause()
+                self.assertIn(pid, [str(value) for value in table.get_column("pid")])
+                self.assertEqual(app.query_one("#search", Input).value, pid)
                 await pilot.press("escape", "space", "l")
                 self.assertTrue(app.paused)
                 self.assertEqual(app.language, "zh-TW")

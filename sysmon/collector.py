@@ -8,13 +8,18 @@ import json
 import os
 from pathlib import Path
 import platform
-import pwd
 import socket
 import subprocess
 import time
 from typing import Any
 
 import psutil
+
+if psutil.WINDOWS:
+    from . import _windows
+    from ._windows_counters import WindowsCounters
+else:
+    import pwd
 
 
 CPU_FIELDS = (
@@ -64,15 +69,15 @@ def _cpu_usage(current: Any, previous: Any | None) -> tuple[float | None, dict]:
         field: max(0.0, getattr(current, field, 0) - getattr(previous, field, 0))
         for field in current._fields
     }
-    # Linux includes guest time in user/nice; count it only once.
-    delta["user"] -= delta.get("guest", 0)
-    delta["nice"] = delta.get("nice", 0) - delta.get("guest_nice", 0)
-    delta = {field: max(0.0, value) for field, value in delta.items()}
+    if "guest" in delta:
+        # Linux includes guest time in user/nice; count it only once.
+        delta["user"] = max(0.0, delta["user"] - delta["guest"])
+        delta["nice"] = max(0.0, delta["nice"] - delta["guest_nice"])
     total = sum(delta.values())
     if total <= 0:
         return None, dict.fromkeys(CPU_FIELDS)
-    breakdown = {field: 100 * delta.get(field, 0) / total for field in CPU_FIELDS}
-    busy = max(0.0, min(100.0, 100 - breakdown["idle"] - breakdown["iowait"]))
+    breakdown = {field: 100 * delta[field] / total if field in delta else None for field in CPU_FIELDS}
+    busy = max(0.0, min(100.0, 100 - breakdown["idle"] - (breakdown["iowait"] or 0)))
     return busy, breakdown
 
 
@@ -102,6 +107,8 @@ def _read_process_file(directory: int, name: str) -> bytes | None:
 
 
 def _hardware() -> dict:
+    if psutil.WINDOWS:
+        return _windows.hardware()
     fields: dict[str, str] = {}
     try:
         result = subprocess.run(
@@ -162,9 +169,8 @@ class Collector:
         self._logical = psutil.cpu_count() or 1
         self._physical = psutil.cpu_count(logical=False)
         self._boot_time = psutil.boot_time()
-        self._clock_ticks = os.sysconf("SC_CLK_TCK")
         self._previous_cpu = None
-        self._previous_cores: dict[int, CpuTimes] = {}
+        self._previous_cores = {}
         self._previous_processes: dict[tuple, tuple[float, float]] = {}
         self._previous_disk: dict = {}
         self._previous_network: dict = {}
@@ -172,19 +178,22 @@ class Collector:
         self._network_time: float | None = None
         self._power_previous: tuple[float, list[int]] | None = None
         self._power_domains: list[tuple[Path, int]] = []
-        for domain in Path("/sys/class/powercap").glob("*"):
-            try:
-                if (domain / "name").read_text().strip().startswith("package-"):
-                    maximum = int((domain / "max_energy_range_uj").read_text())
-                    self._power_domains.append((domain / "energy_uj", maximum))
-            except (OSError, ValueError):
-                continue
+        if not psutil.WINDOWS:
+            self._clock_ticks = os.sysconf("SC_CLK_TCK")
+            for domain in Path("/sys/class/powercap").glob("*"):
+                try:
+                    if (domain / "name").read_text().strip().startswith("package-"):
+                        maximum = int((domain / "max_energy_range_uj").read_text())
+                        self._power_domains.append((domain / "energy_uj", maximum))
+                except (OSError, ValueError):
+                    continue
         self._nvml = None
         self._gpu_status = ""
+        self._windows_counters = WindowsCounters() if psutil.WINDOWS else None
         self._init_gpu()
 
     def _init_gpu(self) -> None:
-        self._jetson_gpu = next(Path("/sys/class/devfreq").glob("*.ga10b"), None)
+        self._jetson_gpu = None if psutil.WINDOWS else next(Path("/sys/class/devfreq").glob("*.ga10b"), None)
         self._jetson_temperature = None
         if self._jetson_gpu is not None:
             for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
@@ -204,6 +213,8 @@ class Collector:
             try:
                 pynvml.nvmlInit()
             except pynvml.NVMLError_LibraryNotFound:
+                if psutil.WINDOWS:
+                    raise
                 # WSL ships its NVML library outside the usual loader paths.
                 wsl_library = Path("/usr/lib/wsl/lib/libnvidia-ml.so.1")
                 if not wsl_library.exists():
@@ -216,6 +227,8 @@ class Collector:
             self._gpu_status = f"無法讀取 NVIDIA GPU：{error}"
 
     def close(self) -> None:
+        if self._windows_counters is not None:
+            self._windows_counters.close()
         if self._nvml is not None:
             try:
                 self._nvml.nvmlShutdown()
@@ -296,10 +309,10 @@ class Collector:
                     continue
         return max(readings) if readings else None
 
-    def _cpu(self) -> dict:
+    def _cpu(self, windows_power: float | None = None) -> dict:
         # Read aggregate, IDs and counters together so CPU hotplug cannot
         # pair one core's counters with another core's identity.
-        total, cores = _read_cpu_times()
+        total, cores = _windows.cpu_times() if psutil.WINDOWS else _read_cpu_times()
         core_ids = sorted(cores)
         percent, times = _cpu_usage(total, self._previous_cpu)
         core_results = [
@@ -311,30 +324,49 @@ class Collector:
             frequency = psutil.cpu_freq()
         except (OSError, NotImplementedError):
             frequency = None
-        power, power_status = self._cpu_power()
+        if psutil.WINDOWS:
+            temperature, power = _windows.cpu_temperature(), windows_power
+            power_status = ""
+            if power is None:
+                power_status = "等待下一次取樣" if percent is None else "系統未提供 CPU 功耗感測器"
+        else:
+            temperature = self._cpu_temperature()
+            power, power_status = self._cpu_power()
         return {
             "percent": percent, "per_core": [row[0] for row in core_results],
             "core_ids": core_ids,
             "times": times, "per_core_times": [row[1] for row in core_results],
             "logical": len(cores) or self._logical, "physical": self._physical,
             "frequency_mhz": frequency.current if frequency else None,
-            "load": list(os.getloadavg()), "temperature": self._cpu_temperature(),
+            "load": None if psutil.WINDOWS else list(os.getloadavg()),
+            "temperature": temperature,
             "power_watts": power, "power_status": power_status,
         }
 
     @staticmethod
     def _memory() -> dict:
-        memory, swap = psutil.virtual_memory(), psutil.swap_memory()
+        memory = psutil.virtual_memory()
+        try:
+            swap = psutil.swap_memory()
+        except (OSError, RuntimeError):
+            # Windows page-file performance counters may be disabled.
+            if not psutil.WINDOWS:
+                raise
+            swap = None
+        missing = None if psutil.WINDOWS else 0
         return {
             "total": memory.total, "available": memory.available,
             "used": memory.total - memory.available, "free": memory.free,
             # psutil's Linux cached field already includes SReclaimable.
-            "cached": getattr(memory, "cached", 0), "buffers": getattr(memory, "buffers", 0),
-            "shared": getattr(memory, "shared", 0), "percent": memory.percent,
-            "swap": {key: getattr(swap, key) for key in ("total", "used", "free", "percent")},
+            "cached": getattr(memory, "cached", missing), "buffers": getattr(memory, "buffers", missing),
+            "shared": getattr(memory, "shared", missing), "percent": memory.percent,
+            "swap": {key: getattr(swap, key, None) for key in ("total", "used", "free", "percent")},
         }
 
     def _processes(self) -> list[dict]:
+        if psutil.WINDOWS:
+            rows, self._previous_processes = _windows.processes(self._previous_processes)
+            return rows
         rows, current, users = [], {}, {}
         with os.scandir(psutil.PROCFS_PATH) as entries:
             for entry in entries:
@@ -413,7 +445,7 @@ class Collector:
     @staticmethod
     def _disks() -> list[dict]:
         rows, seen = [], set()
-        for partition in psutil.disk_partitions(all=True):
+        for partition in psutil.disk_partitions(all=not psutil.WINDOWS):
             if (partition.mountpoint in seen or partition.fstype in PSEUDO_FILESYSTEMS
                     or partition.device.startswith(("/dev/loop", "/dev/ram"))
                     or (partition.fstype == "overlay" and partition.mountpoint != "/")):
@@ -429,13 +461,13 @@ class Collector:
             rows.append(row)
         return sorted(rows, key=lambda row: (row["mountpoint"] != "/", row["mountpoint"]))
 
-    def _disk_io(self) -> list[dict]:
+    def _disk_io(self, windows_busy: dict[str, float] | None = None) -> list[dict]:
         counters = psutil.disk_io_counters(perdisk=True, nowrap=False) or {}
         now = time.monotonic()
         elapsed = now - self._disk_time if self._disk_time is not None else None
         rows = []
         for name, counter in counters.items():
-            if name.startswith(("loop", "ram")) or (Path("/sys/class/block") / name / "partition").exists():
+            if not psutil.WINDOWS and (name.startswith(("loop", "ram")) or (Path("/sys/class/block") / name / "partition").exists()):
                 continue
             previous = self._previous_disk.get(name)
             row = {"name": name}
@@ -450,6 +482,8 @@ class Collector:
                         if output == "busy_percent":
                             value = min(100.0, value / 10)
                 row[output] = value
+            if windows_busy is not None:
+                row["busy_percent"] = windows_busy.get(name)
             rows.append(row)
         self._previous_disk, self._disk_time = counters, now
         return rows
@@ -498,7 +532,9 @@ class Collector:
                 latest[sample.pid] = sample
         return {pid: float(sample.smUtil) for pid, sample in latest.items()}
 
-    def _gpus(self, processes: list[dict]) -> tuple[list[dict], str]:
+    def _gpus(
+        self, processes: list[dict], windows_vram: dict[tuple[int, int, int], dict[int, int]] | None = None,
+    ) -> tuple[list[dict], str]:
         nvml = self._nvml
         if nvml is None:
             if self._jetson_gpu is not None:
@@ -557,7 +593,15 @@ class Collector:
                             "host_memory": host.get("memory"), "command": host.get("command", ""),
                         }
             process_usage = self._gpu_process_utilization(handle, set(gpu_processes))
+            dedicated = {}
+            if windows_vram and any(row["memory"] is None for row in gpu_processes.values()):
+                pci = query(nvml.nvmlDeviceGetPciInfo, handle)
+                if pci is not None:
+                    adapter = self._windows_counters.gpu_adapter_key(pci.busId)
+                    dedicated = windows_vram.get(adapter, {})
             for pid, row in gpu_processes.items():
+                if row["memory"] is None:
+                    row["memory"] = dedicated.get(pid)
                 row["gpu_utilization"] = process_usage.get(pid)
                 row["memory_percent"] = (
                     row["memory"] / memory.total * 100
@@ -607,14 +651,15 @@ class Collector:
 
     def sample(self) -> dict:
         timestamp = time.time()
-        cpu, memory = self._cpu(), self._memory()
+        busy, vram, power = self._windows_counters.sample() if self._windows_counters is not None else (None, None, None)
+        cpu, memory = self._cpu(power), self._memory()
         processes = self._processes()
-        gpus, gpu_status = self._gpus(processes)
+        gpus, gpu_status = self._gpus(processes, vram)
         return {
             "timestamp": timestamp, "hostname": self.hostname,
             "uptime": max(0.0, timestamp - self._boot_time),
             "cpu": cpu, "memory": memory, "processes": processes,
-            "disks": self._disks(), "disk_io": self._disk_io(),
+            "disks": self._disks(), "disk_io": self._disk_io(busy),
             "network": self._network(), "gpus": gpus, "gpu_status": gpu_status,
             "hardware": self.hardware,
         }

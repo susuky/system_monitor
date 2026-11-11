@@ -1,20 +1,23 @@
 """以真實終端機與系統訊號驗證退出流程。"""
 
-import fcntl
 import os
 from pathlib import Path
-import pty
 import select
 import signal
 import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 import unittest
 
+if sys.platform.startswith("linux"):
+    import fcntl
+    import pty
+    import termios
 
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "uses Linux PTY and process signals")
 class CliExitTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="sysmon-cli-test-")

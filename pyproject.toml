@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vital-tui"
 version = "0.2.0"
-description = "Linux 終端機系統資源監視器"
+description = "Linux 與 Windows 終端機系統資源監視器"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

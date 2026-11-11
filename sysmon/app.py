@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime
 from functools import lru_cache
+from ipaddress import ip_address
 import math
 from pathlib import Path
+import platform
 import shlex
 import threading
 import time
@@ -33,6 +35,7 @@ MINT = "#aff5cf"
 AMBER = "#ffcf70"
 MUTED = "#a3b5c5"
 RED = "#ff9393"
+SYSTEM = platform.system()
 
 
 def number(value, suffix="", digits=1):
@@ -115,6 +118,8 @@ def aligned(left, right, width):
 
 @lru_cache(maxsize=4096)
 def short_command(command, name):
+    if SYSTEM == "Windows":
+        return clean(command or name)
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -355,7 +360,7 @@ class SystemMonitorApp(App):
                                   ("network-label", self.t("網路介面", "Network interfaces"))):
             self.query_one(f"#{identifier}", Static).update(label)
         headings = {
-            "cpu-detail-table": ("CPU", "Core", "Socket", "NUMA", self.t("使用率%", "Busy%"), "user%", "sys%", "iowait%", "irq%", "soft%", "steal%", "idle%"),
+            "cpu-detail-table": ("CPU", "Core", "Socket", "NUMA", self.t("使用率%", "Busy%"), "user%", "sys%", "iowait%", "irq%", "DPC%" if SYSTEM == "Windows" else "soft%", "steal%", "idle%"),
             "storage-filesystems": self.t(("掛載點", "裝置", "格式", "已用", "可用", "總計", "使用率%"), ("Mount", "Device", "Type", "Used", "Free", "Total", "Used%")),
             "storage-io": self.t(("裝置", "讀取/s", "寫入/s", "讀 IOPS", "寫 IOPS", "忙碌%"), ("Device", "Read/s", "Write/s", "Read IOPS", "Write IOPS", "Busy%")),
             "storage-network": self.t(("介面", "狀態", "接收/s", "傳送/s", "累計接收", "累計傳送", "位址"), ("Interface", "State", "Receive/s", "Send/s", "Received", "Sent", "Address")),
@@ -393,7 +398,7 @@ class SystemMonitorApp(App):
             collector.close()
 
     def on_worker_state_changed(self, event: Worker.StateChanged):
-        if event.state == WorkerState.ERROR:
+        if self.is_running and event.state == WorkerState.ERROR:
             self.sampling_error = clean(event.worker.error)
             self.draw_error()
 
@@ -409,6 +414,8 @@ class SystemMonitorApp(App):
         self.exit()
 
     def accept_snapshot(self, data):
+        if not self.is_running:
+            return
         self.sampling_error = None
         self.latest = data
         if self.paused:
@@ -439,7 +446,7 @@ class SystemMonitorApp(App):
         days, remainder = divmod(int(data["uptime"]), 86400)
         hours, remainder = divmod(remainder, 3600)
         state = self.t("已暫停", "Paused") if self.paused else self.t("即時", "Live")
-        header = aligned(Text.assemble((self.TITLE, f"bold {CYAN}"), f"  │  {clean(data['hostname'])}  │  Linux"),
+        header = aligned(Text.assemble((self.TITLE, f"bold {CYAN}"), f"  │  {clean(data['hostname'])}  │  {SYSTEM}"),
                          Text.assemble((f"{state}  {self.interval:g}s", CYAN), "  │  ",
                                        (datetime.fromtimestamp(data["timestamp"]).strftime("%H:%M:%S"), MINT),
                                        (f"  │  {self.t('開機', 'Up')} {days}d {hours:02}:{remainder // 60:02}", MUTED)),
@@ -492,7 +499,7 @@ class SystemMonitorApp(App):
             meter(memory["percent"], memory_width, MINT), f" {memory['percent']:.1f}%\n",
             (f"Cache {size(memory['cached'])}\n", MUTED),
             f"Swap  {size(swap['used'])} / {size(swap['total'])}\n",
-            meter(swap["percent"], memory_width, MINT), f" {swap['percent']:.1f}%"))
+            meter(swap["percent"], memory_width, MINT), f" {number(swap['percent'], '%')}"))
         gpu = data["gpus"]
         self.query_one("#summary-gpu").border_title = (
             f"GPU {gpu[0]['index']}" + (f" · {len(gpu)} {self.t('張', 'GPUs')}" if len(gpu) > 1 else "")
@@ -502,7 +509,10 @@ class SystemMonitorApp(App):
             Text(self.t("共用系統 RAM", "Shared system RAM") if gpu[0].get("memory_shared") else
                  f"VRAM {size(gpu[0]['memory_used'])} / {size(gpu[0]['memory_total'])}", style=MUTED))
             if gpu else Text(self.status(data["gpu_status"]) or self.t("未偵測到 NVIDIA GPU", "No NVIDIA GPU detected"), style=MUTED))
-        interfaces = [n for n in data["network"] if n["name"] != "lo" and n["up"]]
+        interfaces = [
+            n for n in data["network"] if n["up"] and n["name"] != "lo"
+            and not (n["addresses"] and all(ip_address(address).is_loopback for address in n["addresses"]))
+        ]
         receive = sum(n["recv_rate"] or 0 for n in interfaces) if any(n["recv_rate"] is not None for n in interfaces) else None
         send = sum(n["send_rate"] or 0 for n in interfaces) if any(n["send_rate"] is not None for n in interfaces) else None
         network = Text.assemble((f"↓ {size(receive)}/s", f"bold {CYAN}"),
@@ -556,7 +566,8 @@ class SystemMonitorApp(App):
                 grid.append(("─" * max(1, width // columns - 2) + "  ") * columns + "\n", style="#263440")
         if not indices:
             grid = Text(self.t("沒有符合條件的核心", "No matching cores"), style=MUTED)
-        footer = aligned(Text("Load " + "  ".join(f"{v:.2f}" for v in cpu["load"])),
+        load = Text("Load " + "  ".join(f"{v:.2f}" for v in cpu["load"])) if cpu["load"] else Text()
+        footer = aligned(load,
                          Text(f"user {number(cpu['times']['user'], '%')}  sys {number(cpu['times']['system'], '%')}  iowait {number(cpu['times']['iowait'], '%')}", style=MUTED),
                          self.query_one("#core-footer").content_size.width)
         self.query_one("#cores").styles.height = grid.plain.count("\n") + 1
@@ -565,19 +576,22 @@ class SystemMonitorApp(App):
 
     def draw_cpu_details(self):
         cpu = self.snapshot["cpu"]
+        load = f"\nLoad {' / '.join(f'{v:.2f}' for v in cpu['load'])}" if cpu["load"] else ""
+        power_status = self.status(cpu["power_status"]) if cpu["power_watts"] is None else ""
+        if power_status:
+            power_status = ("   " if load else "\n") + power_status
         self.update_block("cpu-detail-summary", Text.assemble(
             (clean(self.snapshot["hardware"]["cpu_model"] or "CPU"), f"bold {CYAN}"),
             f"\n{cpu['physical'] or '—'} {self.t('核心', 'cores')} / {cpu['logical']} {self.t('執行緒', 'threads')}   {self.t('頻率', 'Frequency')} {number(cpu['frequency_mhz'], ' MHz', 0)}",
             f"   {self.t('溫度', 'Temp')} {number(cpu['temperature'], '°C')}   {self.t('功率', 'Power')} {number(cpu['power_watts'], ' W')}",
-            f"\nLoad {' / '.join(f'{v:.2f}' for v in cpu['load'])}",
-            (f"   {self.status(cpu['power_status'])}" if cpu["power_watts"] is None else "", MUTED)))
+            load, (power_status, MUTED)))
         topology = {item["cpu"]: item for item in self.snapshot["hardware"]["topology"]}
         rows = []
         for i in self.core_indices():
             cpu_id = cpu["core_ids"][i]
             top = topology.get(cpu_id, {})
             times = cpu["per_core_times"][i]
-            rows.append((str(cpu_id), [cpu_id, *[top.get(k, "—") for k in ("core", "socket", "node")], number(cpu["per_core"][i]),
+            rows.append((str(cpu_id), [cpu_id, *[top[k] if top.get(k) is not None else "—" for k in ("core", "socket", "node")], number(cpu["per_core"][i]),
                                  *[number(times[k]) for k in ("user", "system", "iowait", "irq", "softirq", "steal", "idle")]]))
         self.sync_table("cpu-detail-table", rows)
 
@@ -661,7 +675,8 @@ class SystemMonitorApp(App):
 
     def draw_processes(self, identifier, limit=None):
         table = self.query_one(f"#{identifier}", DataTable)
-        search = self.query_one("#search", Input).value.casefold().strip()
+        search_id = "#overview-search" if identifier == "overview-processes" else "#search"
+        search = self.query_one(search_id, Input).value.casefold().strip()
         widths = [8, 10, 8, 10, 10]
         command_width = max(8, table.size.width - 1 - sum(widths) - 12)
         labels = ["PID", self.t("使用者", "User"), "CPU%" + (" ↓" if self.process_sort == "cpu" else ""),
@@ -739,7 +754,7 @@ class SystemMonitorApp(App):
         table.add_row(self.t("可用記憶體", "Available memory"), size(data["memory"]["available"]))
         table.add_row(self.t("記憶體 Cache", "Memory cache"), size(data["memory"]["cached"]))
         swap = data["memory"]["swap"]
-        table.add_row(self.t("Swap 已用 / 總計", "Swap used / total"), f"{size(swap['used'])} / {size(swap['total'])} ({swap['percent']:.1f}%)")
+        table.add_row(self.t("Swap 已用 / 總計", "Swap used / total"), f"{size(swap['used'])} / {size(swap['total'])} ({number(swap['percent'], '%')})")
         table.add_row("Buffers", size(data["memory"]["buffers"]))
         table.add_row("Shared", size(data["memory"]["shared"]))
         self.update_block("hardware-detail", table)
