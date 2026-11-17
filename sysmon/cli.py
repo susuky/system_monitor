@@ -11,10 +11,10 @@ import math
 import os
 import sys
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
-from rich.table import Table
+if TYPE_CHECKING:
+    from rich.console import Console
 
 from . import __version__
 from .settings import DEFAULT_LANGUAGE, LANGUAGES, SettingsError, load_language, save_language, translate_status
@@ -68,8 +68,7 @@ def _interval(value: str, language: str = DEFAULT_LANGUAGE) -> float:
     return number
 
 
-def _sample_count(value: str, language: str = DEFAULT_LANGUAGE) -> int:
-    message = _text(language, "取樣次數必須是正整數", "sample count must be a positive integer")
+def _positive_count(value: str, message: str) -> int:
     try:
         number = int(value)
     except ValueError:
@@ -96,9 +95,11 @@ def _parser(language: str = DEFAULT_LANGUAGE) -> argparse.ArgumentParser:
         help=t("更新／取樣間隔（預設：1，最短：0.2）", "refresh/sample interval (default: 1, minimum: 0.2)"),
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--once", action="store_true", help=t("輸出一次文字摘要", "print one summary"))
+    mode.add_argument("--once", "--text", action="store_true", help=t("輸出一次文字摘要", "print one text summary"))
     mode.add_argument(
-        "-n", "--samples", type=partial(_sample_count, language=language), metavar=t("次數", "COUNT"),
+        "-n", "--samples", type=partial(_positive_count, message=t(
+            "取樣次數必須是正整數", "sample count must be a positive integer",
+        )), metavar=t("次數", "COUNT"),
         help=t("連續取樣，包含每顆 CPU 核心的使用率", "take consecutive samples with per-core CPU usage"),
     )
     parser.add_argument(
@@ -108,6 +109,12 @@ def _parser(language: str = DEFAULT_LANGUAGE) -> argparse.ArgumentParser:
     parser.add_argument(
         "--lang", choices=LANGUAGES,
         help=t("介面語言，啟動時記住選擇", "interface language; remember this choice on launch"),
+    )
+    parser.add_argument(
+        "--demo-gpus", type=partial(_positive_count, message=t(
+            "模擬 GPU 數量必須是正整數", "demo GPU count must be a positive integer",
+        )), default=0, metavar=t("數量", "COUNT"),
+        help=t("以指定數量的模擬 GPU 取代 GPU 資料", "replace GPU readings with COUNT simulated GPUs"),
     )
     return parser
 
@@ -131,6 +138,8 @@ def print_snapshot(
     snapshot: dict[str, Any], *, per_core: bool, console: Console, language: str = DEFAULT_LANGUAGE,
 ) -> None:
     """輸出一次量測；連續取樣另列每顆核心。"""
+    from rich.table import Table
+
     cpu, memory = snapshot["cpu"], snapshot["memory"]
     t = partial(_text, language)
     swap = memory["swap"]
@@ -148,11 +157,15 @@ def print_snapshot(
     load = f"Load {' / '.join(f'{value:.2f}' for value in cpu['load'])}  " if cpu["load"] else ""
     console.print(f"{load}{t('程序', 'Processes')} {len(snapshot['processes'])}")
     console.print(
-        f"RAM {_bytes(memory['used'])} / {_bytes(memory['total'])} "
+        f"RAM {t('已用', 'Used')} {_bytes(memory['used'])} / {_bytes(memory['total'])} "
         f"({_number(memory['percent'], '%')})  {t('可用', 'Available')} {_bytes(memory['available'])}"
     )
     console.print(
+        f"{t('空閒', 'Free')} {_bytes(memory['free'])}  "
         f"Cache {_bytes(memory['cached'])}  Buffers {_bytes(memory['buffers'])}  "
+        f"{t('共用', 'Shared')} {_bytes(memory['shared'])}"
+    )
+    console.print(
         f"Swap {_bytes(swap['used'])} / {_bytes(swap['total'])} "
         f"({_number(swap['percent'], '%')})"
     )
@@ -188,13 +201,13 @@ def print_snapshot(
 
     if snapshot["disks"]:
         table = Table(
-            t("磁碟", "Disk"), t("掛載點", "Mount"), t("已用", "Used"), t("總量", "Total"),
-            t("可用", "Free"), t("使用率", "Usage"), box=None,
+            t("磁碟", "Disk"), t("掛載點", "Mount"), t("已用", "Used"), t("剩餘", "Free"),
+            t("總計", "Total"), t("使用率", "Usage"), box=None,
         )
         for row in snapshot["disks"]:
             table.add_row(
                 row["device"], row["mountpoint"], _bytes(row["used"]),
-                _bytes(row["total"]), _bytes(row["free"]),
+                _bytes(row["free"]), _bytes(row["total"]),
                 translate_status(row["error"], language) if row.get("error") else _number(row["percent"], "%"),
             )
         console.print(table)
@@ -217,8 +230,11 @@ def print_snapshot(
 def _sample(args: argparse.Namespace, language: str) -> int:
     from .collector import Collector
 
-    collector = Collector()
-    console = Console(highlight=False, markup=False)
+    collector = Collector(demo_gpus=args.demo_gpus)
+    if not args.json:
+        from rich.console import Console
+
+        console = Console(highlight=False, markup=False)
     try:
         deadline = time.monotonic() + args.interval
         collector.sample()
@@ -280,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("TEXTUAL_COLOR_SYSTEM", "truecolor")
         from .app import SystemMonitorApp
 
-        SystemMonitorApp(interval=args.interval, language=language).run()
+        SystemMonitorApp(interval=args.interval, language=language, demo_gpus=args.demo_gpus).run()
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:

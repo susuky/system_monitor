@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import datetime, timezone
 import math
 import os
@@ -156,10 +157,10 @@ async def capture():
         app = DemoApp(language=language)
         async with app.run_test(size=(200, 44)) as pilot:
             data = demo_snapshot()
+            gpu_history = app.gpu_history[data["gpus"][0]["uuid"]] = deque(maxlen=90)
             for index in range(72):
                 app.history["cpu"].append(data["cpu"]["percent"] + 11 * math.sin(index / 6) + 4 * math.sin(index / 2))
-                app.history["gpu"].append(64 + 12 * math.sin(index / 8) + 5 * math.sin(index / 3))
-                app.history["memory"].append(29 + index / 32)
+                gpu_history.append(64 + 12 * math.sin(index / 8) + 5 * math.sin(index / 3))
             app.accept_snapshot(data)
             await pilot.pause(0.5)
             assert not app.workers, "Documentation capture must not start a sampling worker"

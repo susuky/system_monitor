@@ -22,11 +22,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.coordinate import Coordinate
 from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Footer, Input, Static, Tab, Tabs
 from textual.worker import Worker, WorkerState
 
 from .collector import Collector
-from .widgets import PlainDataTable
+from .widgets import CommandDataTable, PlainDataTable
 from .settings import SettingsError, save_language, translate_status
 
 
@@ -63,11 +64,6 @@ def meter(percent, width=12, color=CYAN):
     return Text.assemble(("▮" * filled, color), ("▮" * (width - filled), "#344657"))
 
 
-def spark(values, width=24, color=CYAN):
-    chars = "▁▂▃▄▅▆▇█"
-    return Text("".join(chars[min(7, int(max(0, v) * 7 / 100))] for v in list(values)[-width:]), style=color)
-
-
 def panel_table(*headers):
     table = Table(expand=True, box=None, padding=(0, 1), header_style=MUTED)
     for header in headers:
@@ -94,17 +90,51 @@ def text_table(headers, rows, widths):
 
 
 def metric(value, values, width, color):
-    """A three-row value and history, using only terminal cells."""
+    """Fixed 0–100% history beside the current value; no plotting dependency."""
     value_text = number(value, "%")
-    value_width = Digits.get_width(value_text) + 2
+    value_width = Digits.get_width("100.0%") + 2
     lines = [segment.text for segment in Digits(value_text).render(Style(color=color, bold=True))
              if segment.text != "\n"]
-    text = Text("\n".join(lines[:2]) + "\n", style=f"bold {color}")
-    last = Text(lines[2], style=f"bold {color}")
-    last.pad_right(max(0, value_width - last.cell_len))
-    text.append_text(last)
-    text.append_text(spark(values, max(1, width - value_width), color))
-    return text
+    if width < value_width + 12:
+        lines = [value_text, "", ""]
+        value_width = len("100.0%") + 1
+    plot_width = max(1, min(90, width - value_width - 5))
+    points = list(values)[-plot_width:]
+    points = [None] * (plot_width - len(points)) + points
+    levels = [None if point is None else round(max(0, min(100, point)) * 24 / 100) for point in points]
+    rows = []
+    chars = " ▁▂▃▄▅▆▇█"
+    for row, label in enumerate(("100", " 50", "  0")):
+        left = Text(lines[row], style=f"bold {color}")
+        left.pad_right(max(0, value_width - left.cell_len))
+        cells = []
+        for level in levels:
+            filled = 0 if level is None else max(0, min(8, level - (2 - row) * 8))
+            cells.append(chars[filled] if filled else ("▁" if row == 2 and level == 0 else " "))
+        rows.append(Text.assemble(left, (label + "┤", MUTED), ("".join(cells), color)))
+    return Text("\n").join(rows)
+
+
+def memory_segments(memory):
+    """Disjoint htop-style portions; Linux cached already includes shared RAM."""
+    if memory["cached"] is None:
+        return memory["used"], None, None, memory["free"]
+    shared = min(memory["cached"], memory["shared"] or 0)
+    cached = memory["cached"] - shared + (memory["buffers"] or 0)
+    used = max(0, memory["total"] - memory["free"] - cached - shared)
+    return used, shared, cached, memory["free"]
+
+
+def memory_meter(memory, width):
+    result = Text()
+    boundary = 0
+    consumed = 0
+    for value, color in zip(memory_segments(memory), (MINT, CYAN, AMBER, "#344657")):
+        consumed += value or 0
+        end = min(width, round(consumed / memory["total"] * width)) if memory["total"] else width
+        result.append("▮" * max(0, end - boundary), style=color)
+        boundary = end
+    return result
 
 
 def aligned(left, right, width):
@@ -137,10 +167,46 @@ class ResizingPanel(VerticalScroll):
         self.call_after_refresh(self.app.draw)
 
 
-class GPUProcessTable(PlainDataTable):
-    def on_resize(self):
-        # A newly revealed tab receives its table width after TabActivated.
-        self.call_after_refresh(self.app.draw)
+class CommandScreen(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "dismiss", "返回", key_display="Esc"),
+        Binding("ctrl+c", "copy_text", "複製", key_display="Ctrl+C"),
+    ]
+    DEFAULT_CSS = """
+    CommandScreen { align: center middle; background: #10151c 85%; }
+    #command-dialog { width: 90%; height: 85%; border: solid #52ded6;
+                      background: #10151c; border-title-color: #52ded6; }
+    #command-scroll { height: 1fr; padding: 0 1; overflow-x: hidden; }
+    #command-text { height: auto; }
+    """
+
+    def __init__(self, title, command, language):
+        super().__init__()
+        self.command_title = title
+        self.command = command
+        self._bindings.key_to_bindings["escape"] = [
+            Binding("escape", "dismiss", "Back" if language == "en" else "返回", key_display="Esc")
+        ]
+        self._bindings.key_to_bindings["ctrl+c"] = [
+            Binding("ctrl+c", "copy_text", "Copy" if language == "en" else "複製", key_display="Ctrl+C")
+        ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="command-dialog") as dialog:
+            dialog.border_title = self.command_title
+            with VerticalScroll(id="command-scroll"):
+                yield Static(Text(self.command, overflow="fold", no_wrap=False), id="command-text")
+            yield Footer()
+
+    def on_mount(self):
+        self.query_one("#command-scroll").focus()
+
+    def on_click(self, event):
+        if event.button == 3:
+            widget, _ = self.get_widget_at(event.screen_x, event.screen_y)
+            if widget.id != "command-text" or "offset" not in event.style.meta:
+                event.stop()
+                self.dismiss()
 
 
 class SystemMonitorApp(App):
@@ -153,8 +219,8 @@ class SystemMonitorApp(App):
     Tab { color: #a3b5c5; padding: 0 2; }
     Tab.-active { color: #10151c; background: #52ded6; text-style: bold; }
     Underline > .underline--bar { color: #52ded6; }
-    #summary { grid-size: 4; grid-gutter: 0; height: 7; }
-    .summary { border: solid #455766; padding: 0 1; height: 7; border-title-color: #a3b5c5; }
+    #summary { grid-size: 4; grid-gutter: 0; height: 6; }
+    .summary { border: solid #455766; padding: 0 1; height: 6; border-title-color: #a3b5c5; }
     #content { height: 1fr; }
     #overview { overflow: hidden hidden; }
     #overview-top { height: 21; }
@@ -162,7 +228,7 @@ class SystemMonitorApp(App):
     .panel { border: solid #455766; padding: 0 1; border-title-color: #52ded6; border-title-style: bold; }
     #cpu-panel, #process-panel { width: 2fr; }
     #gpu-panel, #filesystem-panel { width: 1fr; }
-    #gpu-panel { scrollbar-gutter: stable; }
+    #gpu-panel, #filesystem-panel { scrollbar-gutter: stable; }
     #cores, #gpu-overview, #filesystems, #cpu-detail-summary, #gpu-detail, #hardware-detail { height: auto; }
     #core-scroll { height: 1fr; overflow-x: hidden; }
     #core-footer { height: 2; border-top: solid #344657; color: #a3b5c5; }
@@ -184,7 +250,6 @@ class SystemMonitorApp(App):
     #gpu-stats { height: auto; max-height: 50%; }
     #gpu-processes { min-height: 4; }
     DataTable { height: 1fr; background: #10151c; scrollbar-size: 1 1; }
-    #overview-processes, #process-table { overflow-x: hidden; }
     DataTable > .datatable--header { background: #171f29; color: #a3b5c5; text-style: bold; }
     DataTable > .datatable--cursor { background: #24414d; color: #f1ffff; }
     DataTable > .datatable--odd-row { background: #141c25; }
@@ -198,7 +263,7 @@ class SystemMonitorApp(App):
     #hardware { padding: 1 2; }
     Footer { background: #171f29; }
     FooterKey > .footer-key--key { background: #20303e; color: #52ded6; }
-    .narrow #summary { grid-size: 2; height: 14; }
+    .narrow #summary { grid-size: 2; height: 12; }
     .narrow #overview { overflow-y: auto; }
     .narrow #overview-top, .narrow #overview-bottom { layout: vertical; height: auto; }
     .narrow #cpu-panel, .narrow #process-panel, .narrow #gpu-panel, .narrow #filesystem-panel { width: 1fr; }
@@ -223,10 +288,11 @@ class SystemMonitorApp(App):
             ("overview", "cpu", "processes", "gpu", "storage", "hardware"), 1)],
     ]
 
-    def __init__(self, interval=1.0, language="zh-TW"):
+    def __init__(self, interval=1.0, language="zh-TW", demo_gpus=0):
         super().__init__()
         self.language = language
         self.interval = interval
+        self.demo_gpus = demo_gpus
         self.snapshot = None
         self.latest = None
         self.sampling_error = None
@@ -234,8 +300,11 @@ class SystemMonitorApp(App):
         self.hot_first = False
         self.busy_only = False
         self.process_sort = "cpu"
+        self._search_on_process_page = False
         self.stop_sampling = threading.Event()
-        self.history = {key: deque(maxlen=90) for key in ("cpu", "memory", "gpu")}
+        self.history = {"cpu": deque(maxlen=90)}
+        self.gpu_history = {}
+        self.history_timestamp = None
         self.table_cache = {}
         self.table_signatures = {}
         self.table_selection = {}
@@ -257,6 +326,10 @@ class SystemMonitorApp(App):
 
     def t(self, zh, en):
         return en if self.language == "en" else zh
+
+    def check_action(self, action, parameters):
+        # Let the modal's copy binding handle Ctrl+C before the app's quit action.
+        return not (action == "quit" and isinstance(self.screen, CommandScreen))
 
     def status(self, text):
         return translate_status(text or "", self.language)
@@ -289,8 +362,8 @@ class SystemMonitorApp(App):
                         with Horizontal(id="overview-process-controls"):
                             yield Input(id="overview-search")
                             yield Static(id="overview-process-count")
-                        yield PlainDataTable(id="overview-processes", zebra_stripes=True, cursor_type="row")
-                    with VerticalScroll(id="filesystem-panel", classes="panel"):
+                        yield CommandDataTable(id="overview-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
+                    with ResizingPanel(id="filesystem-panel", classes="panel"):
                         yield Static(id="filesystems")
             with Vertical(id="cpu"):
                 yield Static(id="cpu-detail-summary")
@@ -304,13 +377,13 @@ class SystemMonitorApp(App):
                     yield Button("CPU% ↓", id="sort-cpu")
                     yield Button(id="sort-memory")
                     yield Static(id="process-count")
-                yield PlainDataTable(id="process-table", zebra_stripes=True, cursor_type="row")
+                yield CommandDataTable(id="process-table", zebra_stripes=True, cursor_type="row", fixed_columns=1)
                 with VerticalScroll(id="process-command-scroll"):
                     yield Static(id="process-command")
             with Vertical(id="gpu", classes="panel"):
                 with ResizingPanel(id="gpu-stats"):
                     yield Static(id="gpu-detail")
-                yield GPUProcessTable(id="gpu-processes", zebra_stripes=True, cursor_type="row")
+                yield CommandDataTable(id="gpu-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
                 with VerticalScroll(id="gpu-command-scroll"):
                     yield Static(id="gpu-command")
             with VerticalScroll(id="storage"):
@@ -329,7 +402,7 @@ class SystemMonitorApp(App):
         signature = tuple(columns)
         if self.table_signatures.get(identifier) == signature:
             return
-        self.table_scroll[identifier] = table.scroll_y
+        self.table_scroll[identifier] = table.scroll_offset
         if table.row_count and identifier != "overview-processes":
             self.table_selection[identifier] = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         table.clear(columns=True)
@@ -355,13 +428,17 @@ class SystemMonitorApp(App):
             field.placeholder = self.t("搜尋程序 / PID / 使用者", "Search process / PID / user")
             field.tooltip = self.t("搜尋名稱、指令、PID 或使用者", "Search name, command, PID or user")
         self.query_one("#sort-memory", Button).label = self.t("記憶體 ↓", "Memory ↓")
+        for table in self.query(CommandDataTable):
+            table._bindings.key_to_bindings["enter"] = [
+                Binding("enter", "select_cursor", self.t("完整指令", "Full command"), key_display="Enter")
+            ]
         for identifier, label in (("storage-label", self.t("磁碟容量", "Disk capacity")),
                                   ("io-label", self.t("磁碟 I/O", "Disk I/O")),
                                   ("network-label", self.t("網路介面", "Network interfaces"))):
             self.query_one(f"#{identifier}", Static).update(label)
         headings = {
             "cpu-detail-table": ("CPU", "Core", "Socket", "NUMA", self.t("使用率%", "Busy%"), "user%", "sys%", "iowait%", "irq%", "DPC%" if SYSTEM == "Windows" else "soft%", "steal%", "idle%"),
-            "storage-filesystems": self.t(("掛載點", "裝置", "格式", "已用", "可用", "總計", "使用率%"), ("Mount", "Device", "Type", "Used", "Free", "Total", "Used%")),
+            "storage-filesystems": self.t(("掛載點", "裝置", "格式", "已用", "剩餘", "總計", "使用率%"), ("Mount", "Device", "Type", "Used", "Free", "Total", "Used%")),
             "storage-io": self.t(("裝置", "讀取/s", "寫入/s", "讀 IOPS", "寫 IOPS", "忙碌%"), ("Device", "Read/s", "Write/s", "Read IOPS", "Write IOPS", "Busy%")),
             "storage-network": self.t(("介面", "狀態", "接收/s", "傳送/s", "累計接收", "累計傳送", "位址"), ("Interface", "State", "Receive/s", "Send/s", "Received", "Sent", "Address")),
         }
@@ -379,13 +456,13 @@ class SystemMonitorApp(App):
     def on_mount(self):
         self.apply_language()
         self.query_one("#overview-processes", DataTable).focus(scroll_visible=False)
-        self.screen.set_class(self.size.width < 110, "narrow")
-        self.screen.set_class(self.size.height < 32, "compact")
+        self.default_screen.set_class(self.size.width < 110, "narrow")
+        self.default_screen.set_class(self.size.height < 32, "compact")
         self.collect()
 
     @work(thread=True, exit_on_error=False)
     def collect(self):
-        collector = Collector()
+        collector = Collector(demo_gpus=self.demo_gpus)
         try:
             while not self.stop_sampling.is_set():
                 started = time.monotonic()
@@ -421,16 +498,28 @@ class SystemMonitorApp(App):
         if self.paused:
             return
         self.snapshot = data
-        for key, value in (("cpu", data["cpu"]["percent"]), ("memory", data["memory"]["percent"]),
-                           ("gpu", data["gpus"][0]["utilization"] if data["gpus"] else None)):
-            if value is not None:
-                self.history[key].append(value)
+        new_sample = data["timestamp"] != self.history_timestamp
+        self.history_timestamp = data["timestamp"]
+        histories = [(self.history["cpu"], data["cpu"]["percent"])]
+        current_gpus = set()
+        for gpu in data["gpus"]:
+            key = gpu.get("uuid") or gpu["index"]
+            current_gpus.add(key)
+            history = self.gpu_history.setdefault(key, deque(maxlen=90))
+            histories.append((history, gpu["utilization"]))
+        for history, value in histories:
+            if not new_sample and history:
+                history[-1] = value
+            else:
+                history.append(value)
+        for key in self.gpu_history.keys() - current_gpus:
+            del self.gpu_history[key]
         with self.batch_update():
             self.draw()
 
     def on_resize(self, event):
-        self.screen.set_class(event.size.width < 110, "narrow")
-        self.screen.set_class(event.size.height < 32, "compact")
+        self.default_screen.set_class(event.size.width < 110, "narrow")
+        self.default_screen.set_class(event.size.height < 32, "compact")
         if self.snapshot:
             self.call_after_refresh(self.draw)
 
@@ -461,17 +550,24 @@ class SystemMonitorApp(App):
             self.draw_cores()
             self.update_block("gpu-overview", self.gpu_view(compact=True))
             self.draw_processes("overview-processes", limit=100)
-            disk_width = self.query_one("#filesystem-panel").content_size.width
-            headers = (self.t("掛載點", "Mount"), self.t("已用 / 總計", "Used / Total"), self.t("使用率", "Usage"))
-            rows = []
-            capacity_width = 21
-            mount_width = min(16, max(6, disk_width // 5))
-            usage_width = max(8, disk_width - mount_width - capacity_width - 4)
-            for disk in data["disks"]:
-                capacity = self.status(disk.get("error")) or f"{size(disk['used'])} / {size(disk['total'])}"
-                usage = Text.assemble(meter(disk["percent"], max(1, usage_width - 7), MINT), f" {number(disk['percent'], '%')}")
-                rows.append((disk["mountpoint"], capacity, usage))
-            self.update_block("filesystems", text_table(headers, rows, (mount_width, capacity_width, usage_width)))
+            disk_width = self.query_one("#filesystems").content_size.width
+            if disk_width >= 64:
+                headers = self.t(("掛載點", "已用", "剩餘", "總計", "使用率"), ("Mount", "Used", "Free", "Total", "Usage"))
+                mount_width = min(16, disk_width // 5)
+                usage_width = disk_width - mount_width - 38
+                rows = []
+                for disk in data["disks"]:
+                    usage = Text.assemble(meter(disk["percent"], max(1, usage_width - 7), MINT), f" {number(disk['percent'], '%')}")
+                    rows.append((disk["mountpoint"], size(disk["used"]), size(disk["free"]), size(disk["total"]),
+                                 self.status(disk.get("error")) or usage))
+                filesystems = text_table(headers, rows, (mount_width, 10, 10, 10, usage_width))
+            else:
+                lines = [Text(self.t("已用 / 剩餘 / 總計", "Used / Free / Total"), style=MUTED)]
+                for disk in data["disks"]:
+                    lines.append(aligned(Text(clean(disk["mountpoint"])), Text(number(disk["percent"], "%"), style=MINT), disk_width))
+                    lines.append(Text(self.status(disk.get("error")) or f"{size(disk['used'])} / {size(disk['free'])} / {size(disk['total'])}"))
+                filesystems = Text("\n").join(lines)
+            self.update_block("filesystems", filesystems)
         elif active == "cpu":
             self.draw_cpu_details()
         elif active == "processes":
@@ -490,25 +586,35 @@ class SystemMonitorApp(App):
         width = max(20, self.query_one("#summary-cpu").content_size.width)
         self.update_text("summary-cpu", Text.assemble(
             metric(cpu["percent"], self.history["cpu"], width, CYAN),
-            "\n\n", (self.t("溫度 ", "Temp "), MUTED), number(cpu["temperature"], "°C"),
+            "\n", (self.t("溫度 ", "Temp "), MUTED), number(cpu["temperature"], "°C"),
             (self.t("  功率 ", "  Power "), MUTED), number(cpu["power_watts"], " W")))
         swap = memory["swap"]
-        memory_width = max(8, self.query_one("#summary-memory").content_size.width - 8)
+        memory_width = max(8, self.query_one("#summary-memory").content_size.width)
+        used, shared, cached, _ = memory_segments(memory)
         self.update_text("summary-memory", Text.assemble(
-            (f"{size(memory['used'])} / {size(memory['total'])}\n", f"bold {MINT}"),
-            meter(memory["percent"], memory_width, MINT), f" {memory['percent']:.1f}%\n",
-            (f"Cache {size(memory['cached'])}\n", MUTED),
-            f"Swap  {size(swap['used'])} / {size(swap['total'])}\n",
-            meter(swap["percent"], memory_width, MINT), f" {number(swap['percent'], '%')}"))
+            (f"{self.t('已用', 'Used')} {size(used + (shared or 0))} / {size(memory['total'])}\n", f"bold {MINT}"),
+            memory_meter(memory, memory_width), "\n",
+            (f"Cache {size(cached)}", AMBER), (f"  {self.t('共用', 'Shared')} {size(shared)}\n", CYAN),
+            f"Swap {size(swap['used'])} / {size(swap['total'])}  {number(swap['percent'], '%')}"))
         gpu = data["gpus"]
-        self.query_one("#summary-gpu").border_title = (
-            f"GPU {gpu[0]['index']}" + (f" · {len(gpu)} {self.t('張', 'GPUs')}" if len(gpu) > 1 else "")
-            if gpu else "GPU")
-        self.update_text("summary-gpu", Text.assemble(
-            metric(gpu[0]["utilization"], self.history["gpu"], width, AMBER), "\n\n",
-            Text(self.t("共用系統 RAM", "Shared system RAM") if gpu[0].get("memory_shared") else
-                 f"VRAM {size(gpu[0]['memory_used'])} / {size(gpu[0]['memory_total'])}", style=MUTED))
-            if gpu else Text(self.status(data["gpu_status"]) or self.t("未偵測到 NVIDIA GPU", "No NVIDIA GPU detected"), style=MUTED))
+        self.query_one("#summary-gpu").border_title = f"GPU · {len(gpu)}" if len(gpu) > 1 else f"GPU {gpu[0]['index']}" if gpu else "GPU"
+        gpu_width = max(8, self.query_one("#summary-gpu").content_size.width)
+        if len(gpu) > 1:
+            visible = 3 if len(gpu) > 4 else 4
+            rows = [aligned(Text(f"GPU {item['index']}", style=CYAN),
+                            Text(f"{number(item['utilization'], '%')}  {size(item['memory_used'])}", style=AMBER), gpu_width)
+                    for item in gpu[:visible]]
+            if len(gpu) > visible:
+                rows.append(Text(f"… +{len(gpu) - visible} GPU", style=MUTED))
+            summary = Text("\n").join(rows)
+        elif gpu:
+            summary = Text.assemble(
+                metric(gpu[0]["utilization"], self.gpu_history.get(gpu[0].get("uuid") or gpu[0]["index"], ()), gpu_width, AMBER), "\n",
+                Text(self.t("共用系統 RAM", "Shared system RAM") if gpu[0].get("memory_shared") else
+                     f"VRAM {size(gpu[0]['memory_used'])} / {size(gpu[0]['memory_total'])}", style=MUTED))
+        else:
+            summary = Text(self.status(data["gpu_status"]) or self.t("未偵測到 NVIDIA GPU", "No NVIDIA GPU detected"), style=MUTED)
+        self.update_text("summary-gpu", summary)
         interfaces = [
             n for n in data["network"] if n["up"] and n["name"] != "lo"
             and not (n["addresses"] and all(ip_address(address).is_loopback for address in n["addresses"]))
@@ -602,6 +708,8 @@ class SystemMonitorApp(App):
         width = max(20, self.query_one("#gpu-overview" if compact else "#gpu-detail").content_size.width)
         for gpu in self.snapshot["gpus"]:
             title = Text.assemble((f"GPU {gpu['index']}  ", f"bold {CYAN}"), (clean(gpu["name"]), "bold"))
+            history = self.gpu_history.get(gpu.get("uuid") or gpu["index"], ())
+            usage = metric(gpu["utilization"], history, width, AMBER)
             memory_text = (self.t("共用系統 RAM", "Shared system RAM") if gpu.get("memory_shared") else
                            f"{size(gpu['memory_used'])} / {size(gpu['memory_total'])}")
             if not compact:
@@ -614,11 +722,9 @@ class SystemMonitorApp(App):
                 widths = (6, 23, 7, 10, 7, 13)
                 extra = max(0, width - sum(widths) - 10) // len(widths)
                 metrics = text_table(headers, [values], [size + extra for size in widths])
-                elements.extend([title, metrics, Text("")])
+                elements.extend([title, usage, metrics, Text("")])
                 continue
             memory_percent = (gpu["memory_used"] / gpu["memory_total"] * 100) if gpu["memory_total"] and gpu["memory_used"] is not None else None
-            history = self.history["gpu"] if gpu is self.snapshot["gpus"][0] else []
-            usage = metric(gpu["utilization"], history, width, AMBER)
             memory = Text.assemble((self.t("顯存  ", "VRAM  "), MUTED), f"{size(gpu['memory_used'])} / {size(gpu['memory_total'])}\n", meter(memory_percent, width, AMBER))
             if gpu.get("memory_shared"):
                 memory = Text(memory_text, style=MUTED)
@@ -626,14 +732,20 @@ class SystemMonitorApp(App):
                                  [[Text(number(gpu[key], unit, 0), style="bold") for key, unit in
                                    (("temperature", "°C"), ("power_watts", " W"), ("fan_percent", "%"))]],
                                  [(width - 4) // 3] * 3)
-            elements.extend([title, usage, Text(""), memory, Text(""), metrics])
+            elements.extend([title, usage, memory, Text(""), metrics])
+            if len(self.snapshot["gpus"]) > 1:
+                elements.append(Text(""))
+                continue
             if not gpu.get("processes_supported", True):
                 elements.append(Text(""))
                 continue
             items = sorted(gpu["processes"], key=lambda p: (-(p.get("gpu_utilization") or 0), -(p["memory"] or 0), p["pid"]))[:8]
             headers = ["PID", self.t("程序", "Process"), "GPU%", "CPU%", self.t("顯存", "VRAM")]
-            rows = [[str(p["pid"]), p["name"], number(p.get("gpu_utilization"), digits=0),
-                     number(p.get("cpu")), size(p["memory"])] for p in items]
+            rows = []
+            for p in items:
+                link = Style(underline=True, meta={"@click": f"app.gpu_command({gpu['index']},{p['pid']})"})
+                rows.append([Text(str(p["pid"]), style=link), Text(clean(p["name"]), style=link),
+                             number(p.get("gpu_utilization"), digits=0), number(p.get("cpu")), size(p["memory"])])
             widths = (7, max(4, width - 37), 5, 7, 10)
             if width < 41:
                 # Keep PID and usage visible when the side panel is narrow.
@@ -652,13 +764,12 @@ class SystemMonitorApp(App):
         table = self.query_one("#gpu-processes", DataTable)
         table.display = any(gpu.get("processes_supported", True) for gpu in self.snapshot["gpus"])
         self.query_one("#gpu-command-scroll").display = table.display
+        self.query_one("#gpu-stats").styles.max_height = "50%" if table.display else "100%"
         widths = [8, 10, 4, 9, 6, 18, 7, 11]
         labels = ["PID", self.t("使用者", "User"), self.t("卡號", "Dev"), self.t("類型", "Type"), "GPU%",
                   self.t("顯存", "GPU memory"), "CPU%", self.t("主記憶體", "Host memory"), self.t("指令", "Command")]
         keys = ("pid", "user", "device", "type", "gpu", "memory", "cpu", "host_memory", "command")
-        command_width = max(24, table.size.width - 1 - sum(widths) - 18)
-        self.configure_table("gpu-processes", list(zip(keys, labels, [*widths, command_width])))
-        table.fixed_columns = 1
+        self.configure_table("gpu-processes", list(zip(keys, labels, [*widths, None])))
         processes = [(gpu["index"], p) for gpu in self.snapshot["gpus"] for p in gpu["processes"]]
         processes.sort(key=lambda row: (-(row[1].get("gpu_utilization") or 0), -(row[1]["memory"] or 0), row[0], row[1]["pid"]))
         kinds = self.t({"C": "運算", "G": "圖形", "C+G": "運算/圖形"}, {"C": "Compute", "G": "Graphics", "C+G": "C+G"})
@@ -678,10 +789,9 @@ class SystemMonitorApp(App):
         search_id = "#overview-search" if identifier == "overview-processes" else "#search"
         search = self.query_one(search_id, Input).value.casefold().strip()
         widths = [8, 10, 8, 10, 10]
-        command_width = max(8, table.size.width - 1 - sum(widths) - 12)
         labels = ["PID", self.t("使用者", "User"), "CPU%" + (" ↓" if self.process_sort == "cpu" else ""),
                   self.t("記憶體", "Memory") + (" ↓" if self.process_sort == "memory" else ""), self.t("狀態", "State"), self.t("程序", "Command")]
-        self.configure_table(identifier, list(zip(("pid", "user", "cpu", "memory", "status", "command"), labels, [*widths, command_width])))
+        self.configure_table(identifier, list(zip(("pid", "user", "cpu", "memory", "status", "command"), labels, [*widths, None])))
         processes = [p for p in self.snapshot["processes"] if not search or search in f"{p['pid']} {p['user']} {p['name']} {p['command']}".casefold()]
         processes.sort(key=lambda p: (-(p[self.process_sort] if p[self.process_sort] is not None else -1), p["pid"]))
         states = {"running": "執行中", "sleeping": "睡眠", "disk-sleep": "I/O 等待", "stopped": "已停止", "zombie": "殭屍", "idle": "閒置"}
@@ -705,11 +815,12 @@ class SystemMonitorApp(App):
         table = self.query_one(f"#{identifier}", DataTable)
         previous = self.table_cache.get(identifier, {})
         current = dict(rows)
+        removed = previous.keys() - current.keys()
         selected = self.table_selection.pop(identifier, None)
         if identifier != "overview-processes" and table.row_count and table.cursor_row < table.row_count:
             selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         with self.batch_update():
-            for key in previous.keys() - current.keys():
+            for key in removed:
                 table.remove_row(key)
             columns = list(table.columns)
             for key, values in rows:
@@ -718,7 +829,16 @@ class SystemMonitorApp(App):
                 else:
                     for column, old, new in zip(columns, previous[key], values):
                         if old != new:
-                            table.update_cell(key, column, Text(clean(new)) if isinstance(new, str) else new)
+                            table.update_cell(key, column, Text(clean(new)) if isinstance(new, str) else new,
+                                              update_width=column.value == "command")
+            if removed and "command" in table.columns:
+                # Textual retains auto widths after removing their widest row.
+                if rows:
+                    key = rows[0][0]
+                    table.update_cell(key, "command", table.get_cell(key, "command"), update_width=True)
+                else:
+                    column = table.columns["command"]
+                    column.content_width = column.label.cell_len
             # A process may appear on multiple GPUs, so PID alone is not a row identity.
             if list(previous) != list(current):
                 if identifier == "gpu-processes":
@@ -733,7 +853,8 @@ class SystemMonitorApp(App):
                 table.set_reactive(DataTable.cursor_coordinate, Coordinate(table.get_row_index(selected), table.cursor_column))
         self.table_cache[identifier] = current
         if identifier in self.table_scroll:
-            self.call_after_refresh(table.scroll_to, y=self.table_scroll.pop(identifier), animate=False, immediate=True)
+            offset = self.table_scroll.pop(identifier)
+            self.call_after_refresh(table.scroll_to, x=offset.x, y=offset.y, animate=False, immediate=True)
 
     def draw_storage(self):
         data = self.snapshot
@@ -751,6 +872,7 @@ class SystemMonitorApp(App):
             table.add_row(label, Text(clean(data["hardware"].get(key) or "—")))
         table.add_row(self.t("實體記憶體", "Total memory"), size(data["memory"]["total"]))
         table.add_row(self.t("已用記憶體", "Used memory"), f"{size(data['memory']['used'])} ({data['memory']['percent']:.1f}%)")
+        table.add_row(self.t("空閒記憶體", "Free memory"), size(data["memory"]["free"]))
         table.add_row(self.t("可用記憶體", "Available memory"), size(data["memory"]["available"]))
         table.add_row(self.t("記憶體 Cache", "Memory cache"), size(data["memory"]["cached"]))
         swap = data["memory"]["swap"]
@@ -763,8 +885,14 @@ class SystemMonitorApp(App):
     def tab_changed(self, event):
         self.query_one("#content", ContentSwitcher).current = event.tab.id.removeprefix("tab-")
         self.draw()
-        if event.tab.id == "tab-gpu":
-            self.query_one("#gpu-processes", DataTable).focus(scroll_visible=False)
+        identifier = {"tab-overview": "overview-processes", "tab-processes": "process-table", "tab-gpu": "gpu-processes"}.get(event.tab.id)
+        if event.tab.id == "tab-processes" and self._search_on_process_page:
+            identifier = "search"
+        self._search_on_process_page = False
+        if identifier:
+            if identifier == "gpu-processes" and not self.query_one("#gpu-processes").display:
+                identifier = "gpu-stats"
+            self.query_one(f"#{identifier}").focus(scroll_visible=False)
 
     def action_page(self, name):
         self.query_one("#navigation", Tabs).active = f"tab-{name}"
@@ -777,11 +905,14 @@ class SystemMonitorApp(App):
             self.draw()
 
     def action_search(self):
-        if self.query_one("#content", ContentSwitcher).current == "overview":
+        page = self.query_one("#content", ContentSwitcher).current
+        if page == "overview":
             self.query_one("#overview-search", Input).focus(scroll_visible=False)
-        else:
-            self.action_page("processes")
+        elif page == "processes":
             self.query_one("#search", Input).focus(scroll_visible=False)
+        else:
+            self._search_on_process_page = True
+            self.action_page("processes")
 
     def action_clear_search(self):
         self.query_one("#search", Input).value = ""
@@ -837,6 +968,37 @@ class SystemMonitorApp(App):
                 with other.prevent(Checkbox.Changed):
                     other.value = event.value
         self.draw()
+
+    def show_command(self, process, device=None):
+        title = f"PID {process['pid']}"
+        if device is not None:
+            title = f"GPU {device}  ·  {title}"
+        self.push_screen(CommandScreen(title, clean(process.get("command") or process["name"]), self.language))
+
+    @on(DataTable.RowSelected, "#overview-processes")
+    @on(DataTable.RowSelected, "#process-table")
+    @on(DataTable.RowSelected, "#gpu-processes")
+    def command_selected(self, event):
+        if not self.snapshot or event.row_key not in event.data_table.rows:
+            return
+        if event.data_table.id == "gpu-processes":
+            device, pid = map(int, event.row_key.value.split(":"))
+            self.action_gpu_command(device, pid)
+        else:
+            pid = int(str(event.data_table.get_cell(event.row_key, "pid")))
+            process = next((p for p in self.snapshot["processes"] if p["pid"] == pid), None)
+            if process:
+                self.show_command(process)
+
+    def action_gpu_command(self, device, pid):
+        if not self.snapshot:
+            return
+        for gpu in self.snapshot["gpus"]:
+            if gpu["index"] == device:
+                process = next((p for p in gpu["processes"] if p["pid"] == pid), None)
+                if process:
+                    self.show_command(process, device)
+                return
 
     @on(DataTable.RowHighlighted, "#process-table")
     def update_command(self):

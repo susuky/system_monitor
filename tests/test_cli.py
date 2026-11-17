@@ -1,5 +1,6 @@
-"""以真實終端機與系統訊號驗證退出流程。"""
+"""驗證文字／JSON 取樣，以及真實終端機的退出流程。"""
 
+import json
 import os
 from pathlib import Path
 import select
@@ -15,6 +16,69 @@ if sys.platform.startswith("linux"):
     import fcntl
     import pty
     import termios
+
+
+class CliSamplingTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="vital-cli-sampling-")
+        self.addCleanup(directory.cleanup)
+        self.environment = {**os.environ, "XDG_CONFIG_HOME": directory.name, "COLUMNS": "160"}
+        self.directory = Path(__file__).resolve().parents[1]
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "sysmon", "--lang", "en", *args],
+            cwd=self.directory, env=self.environment, encoding="utf-8", capture_output=True, timeout=15,
+        )
+
+    def test_text_alias_reports_memory_fields_and_disk_column_order(self):
+        result = self.run_cli("--text", "-i", "0.2", "--demo-gpus", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn("\x1b", result.stdout)
+        for label in ("RAM Used", "Available", "Free", "Cache", "Buffers", "Shared", "Swap"):
+            self.assertIn(label, result.stdout)
+        for index in range(2):
+            self.assertIn(f"GPU {index} · Simulated GPU {index}", result.stdout)
+        header = next(line for line in result.stdout.splitlines() if "Mount" in line and "Usage" in line)
+        self.assertLess(header.index("Used"), header.index("Free"))
+        self.assertLess(header.index("Free"), header.index("Total"))
+
+    def test_json_stream_is_clean_and_does_not_load_terminal_ui(self):
+        code = (
+            "import sys; from sysmon.cli import main; "
+            "result = main(sys.argv[1:]); "
+            "assert 'textual.app' not in sys.modules; "
+            "assert 'rich.console' not in sys.modules; "
+            "raise SystemExit(result)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code, "--json", "-n", "2", "-i", "0.2", "--demo-gpus", "4"],
+            cwd=self.directory, env=self.environment, encoding="utf-8", capture_output=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        snapshots = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(len(snapshots), 2)
+        self.assertLess(snapshots[0]["timestamp"], snapshots[1]["timestamp"])
+        for snapshot in snapshots:
+            self.assertEqual([gpu["index"] for gpu in snapshot["gpus"]], list(range(4)))
+            self.assertEqual(len({gpu["uuid"] for gpu in snapshot["gpus"]}), 4)
+            self.assertTrue(all(gpu["simulated"] for gpu in snapshot["gpus"]))
+            self.assertEqual(snapshot["memory"]["used"] + snapshot["memory"]["available"], snapshot["memory"]["total"])
+            self.assertIn("free", snapshot["memory"])
+            self.assertIn("shared", snapshot["memory"])
+
+    def test_demo_count_and_output_mode_validation(self):
+        for value in ("0", "-1", "1.5", "invalid"):
+            with self.subTest(value=value):
+                result = self.run_cli("--json", "--demo-gpus", value)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("demo GPU count must be a positive integer", result.stderr)
+        result = self.run_cli("--text", "--samples", "2")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not allowed with", result.stderr)
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "uses Linux PTY and process signals")

@@ -5,6 +5,7 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.widgets import DataTable
+from textual.binding import Binding
 
 
 class PlainDataTable(DataTable):
@@ -43,3 +44,7 @@ class PlainDataTable(DataTable):
         result = [[Segment(text, style)]]
         self._cell_render_cache[cache_key] = result
         return result
+
+
+class CommandDataTable(PlainDataTable):
+    BINDINGS = [Binding("enter", "select_cursor", "完整指令", key_display="Enter")]

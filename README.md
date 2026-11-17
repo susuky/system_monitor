@@ -1,16 +1,16 @@
+![Vital logo](docs/images/vital.png)
+
 # Vital
 
 **English** | [繁體中文](README.zh-TW.md)
 
-A terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and network traffic on Linux and Windows.
-
-It refreshes every second by default, supports English and Traditional Chinese, and can export text reports or JSON snapshots.
+A terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and network traffic on Linux and Windows. It refreshes every second by default, supports English and Traditional Chinese, and exports text or JSON.
 
 ## Interface
 
 ![Vital overview in English](docs/images/overview-en.png)
 
-The overview shows per-core CPU load, memory, GPUs, processes, and disk capacity together. These screenshots were captured from the application using sample data.
+Screenshots use sample data.
 
 ![Vital GPU processes in English](docs/images/gpu-en.png)
 
@@ -38,7 +38,7 @@ Wide terminals display core load in multiple columns. Narrow terminals use a scr
 
 ### Requirements
 
-- Linux (x86_64 or aarch64), WSL2, or native Windows (PowerShell 5.1 or 7), with Python 3.10 or later, `venv`, and `pip`.
+- Linux (x86_64 or aarch64), WSL2, or native Windows (PowerShell 5.1 or 7). Source installs and Windows builds need Python 3.10 or later, `venv`, and `pip`; the standalone Windows executable runs without Python installed.
 - A terminal with Unicode support. The Traditional Chinese interface also needs a Chinese font.
 - Discrete NVIDIA GPUs are read through the driver's NVML library. Jetson Orin (JetPack 5) uses GPU load and temperature readings exposed by the system.
 
@@ -63,18 +63,7 @@ source .venv/bin/activate
 vital --lang en
 ```
 
-To run from the project directory without activating the virtual environment:
-
-```bash
-./vital.sh
-```
-
-If you use `uv`, replace the environment creation and installation steps with:
-
-```bash
-uv venv .venv
-uv pip install --python .venv/bin/python -e .
-```
+From the project directory, `./vital.sh` also runs Vital without activating the virtual environment.
 
 ### Install on Windows
 
@@ -86,21 +75,24 @@ python -m venv .venv-windows
 .\.venv-windows\Scripts\vital.exe
 ```
 
-To run `vital` from any PowerShell directory, copy `vital.exe` to a folder on your user `Path`. For desktop access, create a shortcut to the executable. Keep the project and virtual environment in their original locations.
-
-When your PowerShell execution policy allows local scripts, use `.\vital.ps1` to launch Vital or pipe a sample to PowerShell.
+To build a standalone executable with the Vital icon, install PyInstaller once, then run the build script. `-InstallDesktop` updates the copy on your Windows desktop:
 
 ```powershell
-.\vital.ps1
-.\vital.ps1 --once
+.\.venv-windows\Scripts\python.exe -m pip install "pyinstaller>=6,<7"
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -InstallDesktop
+```
+
+The build creates `dist\vital.exe` and copies it to your desktop. Double-click that file to launch Vital. You can also place the standalone executable in a folder on your user `Path` to run `vital` from any directory. To use another Python environment for the build, pass `-Python "C:\path\to\python.exe"`.
+
+When PowerShell allows local scripts, `.\vital.ps1` also launches Vital and forwards its arguments:
+
+```powershell
 .\vital.ps1 --json | ConvertFrom-Json
 ```
 
 ### CPU temperature on Windows
 
 HWiNFO is optional and supplies the live CPU package temperature on Windows. Run HWiNFO in **Sensors-only** mode. In **Configure Sensors → HWiNFO Gadget**, enable **Enable reporting to Gadget**. Select **CPU Package** under the Intel CPU's DTS group or **CPU (Tctl/Tdie)** on AMD, then check **Report value in Gadget** for that sensor. [HWiNFO Gadget setup](https://docs.rainmeter.net/tips/hwinfo/)
-
-For background monitoring after sign-in, enable **Auto Start**, **Minimize Main Window on Startup**, and **Minimize Sensors on Startup** in HWiNFO's main settings. Turn off **Show Welcome Screen and Progress**. Run `vital --once` after sign-in to check the CPU temperature. [HWiNFO startup settings](https://www.hwinfo.com/forum/threads/auto-logging-to-a-specific-drive-and-csv.10469/)
 
 ### Run `vital` from Any Directory on Linux or WSL2
 
@@ -114,11 +106,10 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Add the last line to your shell's startup file, such as `~/.bashrc` for Bash, to make `vital` available in new terminals. Normal monitoring does not require root privileges.
 
-To use `sudo vital` for restricted CPU power counters, create a system command link once:
+To read restricted CPU power counters, run from the project directory:
 
 ```bash
-sudo ln -s "$HOME/.local/bin/vital" /usr/local/bin/vital
-sudo vital
+sudo .venv/bin/vital
 ```
 
 ### Language
@@ -128,7 +119,7 @@ vital --lang en
 vital --lang zh-TW
 ```
 
-The default interface language is Traditional Chinese. You can also press `l` in the interface to switch languages. Both methods save your choice in `~/.config/vital/config.json`, or `$XDG_CONFIG_HOME/vital/config.json`. Command help and text reports use the selected language as well. When upgrading from an older version, Vital uses the language choice in `~/.config/sysmon/config.json`. The legacy `sysmon` command and `./sysmon.sh` launcher remain available.
+The default language is Traditional Chinese. Press `l` to switch languages in the interface. The choice also applies to help and text reports and is saved in `~/.config/vital/config.json`, or `$XDG_CONFIG_HOME/vital/config.json`.
 
 ## Controls
 
@@ -137,34 +128,51 @@ The default interface language is Traditional Chinese. You can also press `l` in
 | `1`–`6` | Switch tabs |
 | `Space` | Pause or resume display updates |
 | `/` | Search processes |
-| `Esc` | Clear the search and return to the table |
+| `Esc` | Close the full-command window, or clear the search and return to the table |
 | `c` / `m` | Sort processes by CPU / memory |
 | `b` | Sort cores by ID or usage |
 | `l` | Switch between English and Traditional Chinese and save the choice |
-| Arrow keys | Move the table selection |
-| `Ctrl+C` / `q` | Quit; `Ctrl+C` also quits while the search field is focused |
+| `↑` / `↓` | Select a process |
+| `←` / `→` | Scroll the table horizontally; the PID stays visible |
+| `Home` / `End` | Jump to the beginning / end of the table's columns |
+| `Enter` | Open the selected process's full command |
+| `Ctrl+C` | Copy selected text in the full-command window; quit elsewhere |
+| `q` | Quit from the main screen |
 
-Use the `>1%` checkbox in Overview or CPU to show only busy cores. Overview lists the top 100 processes. The Processes tab lists all matching processes and shows the full command for the selected row. The GPU tab lists compute and graphics processes; use the arrow keys to select a process and view its full command. Tables can scroll horizontally in narrow terminals.
+Use the `>1%` checkbox in Overview or CPU to show only busy cores. Overview lists the top 100 processes. The Processes tab lists all matching processes, and the GPU tab lists compute and graphics processes.
+
+The full-command window wraps long commands. Drag to select text and use arrow keys, `PageUp` / `PageDown`, or `Home` / `End` to scroll. Right-click a blank area to close it. Clicking a PID or process name in Overview's GPU panel also opens its full command.
 
 ## Sampling and Export
 
 ```bash
 vital --interval 0.5
-vital --once
+vital --text
 vital --interval 1 --samples 5
 vital --json
 vital --json -i 1 -n 5 > samples.ndjson
 vital --help
 ```
 
-`--once` prints one resource summary. `--samples` includes per-core user, system, iowait, idle, and busy percentages, similar to `mpstat 1 5`. Vital waits one sampling interval at startup to calculate CPU usage and transfer rates. The minimum interval is 0.2 seconds.
+`--text` (also `--once`) prints one resource summary without opening the interactive interface. `--samples` includes per-core user, system, iowait, idle, and busy percentages, similar to `mpstat 1 5`. Vital waits one sampling interval at startup to calculate CPU usage and transfer rates. The minimum interval is 0.2 seconds.
 
-`--json` exports a complete snapshot. With `--samples`, it writes one JSON object per line. JSON field names are independent of the interface language. Snapshots include hostnames, process commands, users, and network addresses; remove sensitive information before sharing them.
+`--json` exports a complete snapshot for scripts and agents. With `--samples`, it writes one JSON object per line (NDJSON), flushing each sample as it arrives. Sampling supports redirected input and output; JSON runs without loading the terminal UI. JSON field names are independent of the interface language.
+
+To view several GPUs using software-generated readings:
+
+```bash
+vital --demo-gpus 4
+vital --json --demo-gpus 4 -i 1 -n 3
+```
+
+`--demo-gpus COUNT` replaces GPU readings with the specified positive number of simulated GPUs. GPU names and status identify the simulation, and each GPU has `simulated: true` in JSON. CPU, memory, disks, network, and host processes continue to show real readings. Omit the option to read hardware GPUs.
 
 ## Metrics and Sensors
 
-- Sizes use binary units: KiB, MiB, and GiB. Used memory is total memory minus available memory.
-- On Linux, cache includes reclaimable kernel memory (`SReclaimable`); buffers are listed separately.
+- Sizes use binary units: KiB, MiB, and GiB. Disks list used, free, and total space, in that order.
+- The memory bar separates ordinary used RAM, shared RAM, cache, and free RAM. The used total above it includes shared RAM. Cache combines buffers and reclaimable kernel cache (`SReclaimable`), with shared RAM deducted so the segments add up to total RAM.
+- Available RAM is the operating system's estimate of memory usable by new processes, shown separately. Text output, the Hardware tab, and JSON retain raw fields: used is `total - available`, raw cache includes shared RAM, and buffers are separate. These raw categories differ from the bar's segments. Unsupported memory fields on Windows appear as `—`, or `null` in JSON.
+- CPU and per-GPU history charts use a fixed 0–100% scale, showing up to 90 consecutive samples. Each GPU has its own history; scroll the GPU panel or GPU tab to see every card.
 - Process CPU usage treats one logical core as 100%, so multithreaded processes can exceed 100%. Overall and per-core busy percentages exclude idle and iowait.
 - On Linux, CPU temperature comes from hardware sensors. CPU power comes from changes in RAPL package energy counters.
 - Per-process GPU% comes from recent NVML SM utilization samples. It is shown as `—` when no recent sample is available or the hardware does not support it. VRAM percentage is the process's share of the GPU's total VRAM; process RAM is RSS.
@@ -172,7 +180,7 @@ vital --help
 
 ## Profiling on Linux and WSL2
 
-These measurements show Vital's own resource usage, with one logical core equal to 100% CPU. All platforms used a real PTY, a one-second refresh interval, and a 160 × 44 terminal. Each tab had a five-second warmup, followed by 30 seconds of measurement on Linux PC and Orin, or 20 seconds on WSL2.
+These measurements use `benchmark.py` without a profiler, with one logical core equal to 100% CPU. All platforms used a real PTY, a one-second refresh interval, and a 160 × 44 terminal. Each tab had a five-second warmup, followed by 30 seconds of measurement on Linux PC and Orin, or 20 seconds on WSL2.
 
 | Platform | Processes | Overview CPU | Processes tab CPU | RSS |
 | --- | ---: | ---: | ---: | ---: |
@@ -195,8 +203,6 @@ To locate CPU bottlenecks, profile the UI and collector threads separately in a 
 .venv/bin/python scripts/profile_runtime.py --output artifacts/profile-ui --profile ui
 .venv/bin/python scripts/profile_runtime.py --output artifacts/profile-collector --profile collector
 ```
-
-The table above uses `benchmark.py` without a profiler. Profiling adds overhead and is intended for locating bottlenecks. On Python 3.12, the profiler may include other threads; the script also measures each component with a thread CPU clock.
 
 ## Copyright
 

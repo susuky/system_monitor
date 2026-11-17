@@ -35,9 +35,9 @@ PROCESS_STATES = {
 CPU_SENSORS = {"k10temp", "coretemp", "cpu_thermal", "cpu-thermal", "cpu-therm", "zenpower"}
 PSEUDO_FILESYSTEMS = {
     "autofs", "binfmt_misc", "bpf", "cgroup", "cgroup2", "configfs",
-    "debugfs", "devpts", "devtmpfs", "efivarfs", "fusectl", "fuse.portal",
+    "debugfs", "devpts", "fusectl", "fuse.portal",
     "fuse.gvfsd-fuse", "hugetlbfs", "mqueue", "nsfs", "proc", "pstore",
-    "rpc_pipefs", "securityfs", "squashfs", "sysfs", "tmpfs", "tracefs",
+    "rpc_pipefs", "securityfs", "squashfs", "sysfs", "tracefs",
 }
 
 
@@ -161,7 +161,9 @@ def _hardware() -> dict:
 class Collector:
     """Stateful sampler; call sample sequentially, from any thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, demo_gpus: int = 0) -> None:
+        if demo_gpus < 0:
+            raise ValueError("demo_gpus must be nonnegative")
         self.hardware = _hardware()
         kernel = self.hardware["kernel"].lower()
         self._wsl = "microsoft" in kernel or "wsl" in kernel
@@ -190,7 +192,13 @@ class Collector:
         self._nvml = None
         self._gpu_status = ""
         self._windows_counters = WindowsCounters() if psutil.WINDOWS else None
-        self._init_gpu()
+        self._demo_gpu_source = None
+        if demo_gpus:
+            from .gpu_demo import DemoGPUs
+
+            self._demo_gpu_source = DemoGPUs(demo_gpus)
+        else:
+            self._init_gpu()
 
     def _init_gpu(self) -> None:
         self._jetson_gpu = None if psutil.WINDOWS else next(Path("/sys/class/devfreq").glob("*.ga10b"), None)
@@ -535,6 +543,8 @@ class Collector:
     def _gpus(
         self, processes: list[dict], windows_vram: dict[tuple[int, int, int], dict[int, int]] | None = None,
     ) -> tuple[list[dict], str]:
+        if self._demo_gpu_source is not None:
+            return self._demo_gpu_source.sample(), "Simulated GPU source"
         nvml = self._nvml
         if nvml is None:
             if self._jetson_gpu is not None:

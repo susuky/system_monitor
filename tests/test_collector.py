@@ -63,6 +63,75 @@ class CollectorTests(unittest.TestCase):
             collector.close()
             collector.close()
 
+    def test_disk_capacity_mounts_include_memory_and_keep_read_errors(self):
+        partitions = [SimpleNamespace(device=device, mountpoint=mount, fstype=kind) for device, mount, kind in (
+            ("/dev/root", "/", "ext4"), ("tmpfs", "/dev/shm", "tmpfs"),
+            ("udev", "/dev", "devtmpfs"), ("efivarfs", "/sys/firmware/efi/efivars", "efivarfs"),
+            ("/dev/restricted", "/restricted", "ext4"), ("/dev/root", "/", "ext4"),
+            ("proc", "/proc", "proc"), ("sysfs", "/sys", "sysfs"),
+            ("cgroup2", "/sys/fs/cgroup", "cgroup2"),
+        )]
+        usage = SimpleNamespace(total=1000, used=300, free=650, percent=31.6)
+
+        def disk_usage(mount):
+            if mount == "/restricted":
+                raise PermissionError(mount)
+            return usage
+
+        with patch("sysmon.collector.psutil.disk_partitions", return_value=partitions), \
+                patch("sysmon.collector.psutil.disk_usage", side_effect=disk_usage) as read_usage:
+            rows = Collector._disks()
+        self.assertEqual({row["mountpoint"] for row in rows}, {
+            "/", "/dev", "/dev/shm", "/sys/firmware/efi/efivars", "/restricted",
+        })
+        self.assertEqual(read_usage.call_count, 5)
+        self.assertEqual(rows[0]["mountpoint"], "/")
+        restricted = next(row for row in rows if row["mountpoint"] == "/restricted")
+        self.assertIsNone(restricted["total"])
+        self.assertEqual(restricted["error"], "無權讀取")
+        self.assertEqual(rows[0]["free"], 650)
+
+    def test_gpu_demo_is_opt_in_and_skips_gpu_initialization(self):
+        with patch.object(Collector, "_init_gpu") as initialize:
+            collector = Collector()
+            try:
+                initialize.assert_called_once()
+                self.assertIsNone(collector._demo_gpu_source)
+            finally:
+                collector.close()
+        for count in (2, 8):
+            with self.subTest(count=count), patch.object(Collector, "_init_gpu") as initialize:
+                collector = Collector(demo_gpus=count)
+                try:
+                    initialize.assert_not_called()
+                    with patch("sysmon.gpu_demo.time.monotonic", return_value=collector._demo_gpu_source._started):
+                        first = collector.sample()
+                    with patch("sysmon.gpu_demo.time.monotonic", return_value=collector._demo_gpu_source._started + 3):
+                        second = collector.sample()
+                    self.assertEqual(len(second["gpus"]), count)
+                    self.assertEqual(second["gpu_status"], "Simulated GPU source")
+                    self.assertEqual(second["memory"]["total"], first["memory"]["total"])
+                    self.assertTrue(second["disks"])
+                    self.assertTrue(second["processes"])
+                    self.assertEqual(len({gpu["uuid"] for gpu in second["gpus"]}), count)
+                    for old, gpu in zip(first["gpus"], second["gpus"]):
+                        self.assertTrue(gpu["simulated"])
+                        self.assertIn("Simulated", gpu["name"])
+                        self.assertEqual(old["uuid"], gpu["uuid"])
+                        self.assertEqual(old["index"], gpu["index"])
+                        self.assertNotEqual(old["utilization"], gpu["utilization"])
+                        self.assertNotEqual(old["memory_used"], gpu["memory_used"])
+                        self.assertTrue(0 <= gpu["utilization"] <= 100)
+                        self.assertTrue(0 <= gpu["memory_used"] <= gpu["memory_total"])
+                        self.assertEqual(gpu["processes"], [])
+                    json.dumps(second, allow_nan=False)
+                finally:
+                    collector.close()
+
+    def test_negative_demo_gpu_count_is_rejected(self):
+        with self.assertRaises(ValueError):
+            Collector(demo_gpus=-1)
+
     def test_guest_time_and_iowait_are_not_double_counted(self):
         Times = namedtuple("Times", CPU_FIELDS)
         previous = Times(*([0] * len(CPU_FIELDS)))
@@ -173,6 +242,7 @@ class CollectorTests(unittest.TestCase):
 
     def test_orin_load_units_shared_memory_and_unreadable_sensor(self):
         collector = Collector.__new__(Collector)
+        collector._demo_gpu_source = None
         collector._nvml = None
         with tempfile.TemporaryDirectory(prefix="vital-orin-") as directory:
             collector._jetson_gpu = Path(directory)
@@ -326,6 +396,7 @@ class CollectorTests(unittest.TestCase):
 
     def test_gpu_process_union_joins_host_details_and_preserves_unknowns(self):
         collector = Collector.__new__(Collector)
+        collector._demo_gpu_source = None
         collector._wsl = False
         collector._nvml = SimpleNamespace(
             NVMLError=RuntimeError, nvmlMemory_v2=2, NVML_TEMPERATURE_GPU=0,
