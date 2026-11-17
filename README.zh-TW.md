@@ -170,7 +170,7 @@ vital --json --demo-gpus 4 -i 1 -n 3
 ## 數值與感測器
 
 - 容量使用 KiB、MiB、GiB 等二進位單位；磁碟依序顯示已用、剩餘、總計。
-- 記憶體條以不同顏色顯示一般已用、共用、Cache 與空閒；頂端已用量包含共用記憶體。Cache 合併 Buffers 與可回收核心快取（SReclaimable），並扣除已單獨顯示的 Shared，讓色塊加總等於實體 RAM。
+- 記憶體條以不同顏色顯示一般已用、Shared、Cache 與空閒；頂端已用量包含 Shared 記憶體。Cache 合併 Buffers 與可回收核心快取（SReclaimable），並扣除已單獨顯示的 Shared，讓色塊加總等於實體 RAM。
 - 可用量（available）是作業系統估計可供新程序使用的 RAM，另行顯示。文字、硬體頁與 JSON 保留原始欄位；其中已用為 `total - available`，原始 cache 包含 Shared、Buffers 另列，因此與記憶體條的分類不同。Windows 不提供的記憶體欄位顯示 `—`，JSON 為 `null`。
 - CPU 與每張 GPU 的歷史圖固定為 0–100%，依取樣順序連續顯示，最多保留 90 筆。多張 GPU 各有獨立歷史；在 GPU 區塊或 GPU 頁捲動可查看所有卡片。
 - 程序 CPU 使用率以單一邏輯核心為 100%，多執行緒程序可超過 100%；整體 CPU 與各核心的忙碌百分比不含 idle、iowait。

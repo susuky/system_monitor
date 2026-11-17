@@ -163,7 +163,7 @@ def print_snapshot(
     console.print(
         f"{t('空閒', 'Free')} {_bytes(memory['free'])}  "
         f"Cache {_bytes(memory['cached'])}  Buffers {_bytes(memory['buffers'])}  "
-        f"{t('共用', 'Shared')} {_bytes(memory['shared'])}"
+        f"Shared {_bytes(memory['shared'])}"
     )
     console.print(
         f"Swap {_bytes(swap['used'])} / {_bytes(swap['total'])} "

@@ -589,12 +589,14 @@ class SystemMonitorApp(App):
             "\n", (self.t("溫度 ", "Temp "), MUTED), number(cpu["temperature"], "°C"),
             (self.t("  功率 ", "  Power "), MUTED), number(cpu["power_watts"], " W")))
         swap = memory["swap"]
-        memory_width = max(8, self.query_one("#summary-memory").content_size.width)
+        memory_width = max(1, self.query_one("#summary-memory").content_size.width - 7)
         used, shared, cached, _ = memory_segments(memory)
+        used += shared or 0
+        used_percent = used / memory["total"] * 100
         self.update_text("summary-memory", Text.assemble(
-            (f"{self.t('已用', 'Used')} {size(used + (shared or 0))} / {size(memory['total'])}\n", f"bold {MINT}"),
-            memory_meter(memory, memory_width), "\n",
-            (f"Cache {size(cached)}", AMBER), (f"  {self.t('共用', 'Shared')} {size(shared)}\n", CYAN),
+            (f"{self.t('已用', 'Used')} {size(used)} / {size(memory['total'])}\n", f"bold {MINT}"),
+            memory_meter(memory, memory_width), f" {used_percent:5.1f}%\n",
+            (f"Cache {size(cached)}", AMBER), (f"  Shared {size(shared)}\n", CYAN),
             f"Swap {size(swap['used'])} / {size(swap['total'])}  {number(swap['percent'], '%')}"))
         gpu = data["gpus"]
         self.query_one("#summary-gpu").border_title = f"GPU · {len(gpu)}" if len(gpu) > 1 else f"GPU {gpu[0]['index']}" if gpu else "GPU"
