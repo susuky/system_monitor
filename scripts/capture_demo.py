@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 import math
 import os
 from pathlib import Path
 import sys
-import time
 import xml.etree.ElementTree as ET
 
 
@@ -58,7 +57,7 @@ def demo_snapshot():
         (4903, "systemd", 0, 16 * MIB, "sleeping", 1, "systemd --user"),
     ]
     snapshot = {
-        "timestamp": datetime(2026, 1, 1, 14, 32, 8, tzinfo=timezone.utc).timestamp(),
+        "timestamp": datetime(2026, 1, 1, 14, 32, 8).timestamp(),
         "hostname": "workstation", "uptime": 3 * 86400 + 9 * 3600 + 18 * 60,
         "cpu": {
             "percent": usage, "core_ids": list(range(48)), "per_core": CORE_LOADS.copy(),
@@ -131,10 +130,10 @@ class DemoApp(SystemMonitorApp):
         """Disable the worker before on_mount can start a real Collector."""
 
 
-def save_svg(app, language, page="overview"):
-    path = app.save_screenshot(f"{page}-{language}.svg", ROOT / "docs/images")
-    tree = ET.parse(path)
-    for element in tree.iter():
+def save_svg(app, path):
+    # Rich uses character counts for SVG textLength. CJK glyphs occupy two terminal cells.
+    svg = ET.fromstring(app.export_screenshot())
+    for element in svg.iter():
         if element.tag.endswith("text") and "textLength" in element.attrib:
             text = "".join(element.itertext())
             if text:
@@ -145,35 +144,33 @@ def save_svg(app, language, page="overview"):
                 "font-family: Fira Code, monospace;",
                 'font-family: "DejaVu Sans Mono", "Noto Sans Mono CJK TC", monospace;',
             )
-    tree.write(path, encoding="unicode")
-    path = Path(path)
-    path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
+    lines = ET.tostring(svg, encoding="unicode").splitlines()
+    path.write_text("\n".join(line.rstrip() for line in lines) + "\n", encoding="utf-8")
     return path
 
 
 async def capture():
-    (ROOT / "docs/images").mkdir(parents=True, exist_ok=True)
+    directory = ROOT / "docs/images"
+    directory.mkdir(parents=True, exist_ok=True)
     for language in ("zh-TW", "en"):
         app = DemoApp(language=language)
         async with app.run_test(size=(200, 44)) as pilot:
             data = demo_snapshot()
             gpu_history = app.gpu_history[data["gpus"][0]["uuid"]] = deque(maxlen=90)
             for index in range(72):
-                app.history["cpu"].append(data["cpu"]["percent"] + 11 * math.sin(index / 6) + 4 * math.sin(index / 2))
+                app.cpu_history.append(data["cpu"]["percent"] + 11 * math.sin(index / 6) + 4 * math.sin(index / 2))
                 gpu_history.append(64 + 12 * math.sin(index / 8) + 5 * math.sin(index / 3))
             app.accept_snapshot(data)
             await pilot.pause(0.5)
             assert not app.workers, "Documentation capture must not start a sampling worker"
             assert app.snapshot["hostname"] == "workstation"
             assert all(process["user"] == "demo" for process in app.snapshot["processes"])
-            print(save_svg(app, language))
+            print(save_svg(app, directory / f"overview-{language}.svg"))
             await pilot.press("4")
             await pilot.pause()
-            print(save_svg(app, language, "gpu"))
+            print(save_svg(app, directory / f"gpu-{language}.svg"))
 
 
 if __name__ == "__main__":
     os.environ.pop("NO_COLOR", None)
-    os.environ["TZ"] = "UTC"
-    time.tzset()
     asyncio.run(capture())

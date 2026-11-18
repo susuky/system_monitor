@@ -3,7 +3,6 @@
 import asyncio
 from copy import deepcopy
 import os
-from pathlib import Path
 import time
 import tempfile
 import unittest
@@ -17,25 +16,9 @@ from textual import events
 from textual.widgets import Checkbox, ContentSwitcher, DataTable, Input, Tab
 
 from sysmon.app import CYAN, CommandScreen, SystemMonitorApp, memory_meter, memory_segments, metric
-from sysmon.gpu_demo import DemoGPUs
+from sysmon.gpu_demo import sample_gpus
 from sysmon.settings import load_language
 from scripts.capture_demo import DemoApp, demo_snapshot
-
-
-def save_screenshot(app, name, directory):
-    path = app.save_screenshot(name, directory)
-    # Rich 15's SVG exporter uses len(text) for textLength. Correct CJK
-    # glyph widths to the same terminal-cell widths used by the live UI.
-    tree = ET.parse(path)
-    for element in tree.iter():
-        if element.tag.endswith("text") and "textLength" in element.attrib:
-            text = "".join(element.itertext())
-            if text:
-                element.set("textLength", str(float(element.get("textLength")) * cell_len(text) / len(text)))
-                element.set("lengthAdjust", "spacingAndGlyphs")
-        if element.tag.endswith("style") and element.text:
-            element.text = element.text.replace("font-family: Fira Code, monospace;", 'font-family: "DejaVu Sans Mono", "Noto Sans Mono CJK TC", monospace;')
-    tree.write(path, encoding="unicode")
 
 
 class ResourceRenderingTests(unittest.TestCase):
@@ -78,23 +61,23 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             started = snapshot["timestamp"]
             app.accept_snapshot(snapshot)
             await pilot.press("space", "space")
-            self.assertEqual(len(app.history["cpu"]), 1)
+            self.assertEqual(len(app.cpu_history), 1)
             for index in range(1, 6):
                 snapshot = deepcopy(snapshot)
                 snapshot["timestamp"] = started + index * 1.4
                 snapshot["cpu"]["percent"] = index * 10
                 app.accept_snapshot(snapshot)
-            self.assertEqual(list(app.history["cpu"])[1:], [10, 20, 30, 40, 50])
-            self.assertEqual(len(app.history["cpu"]), 6)
-            self.assertNotIn(None, app.history["cpu"])
-            self.assertAlmostEqual(app.history_timestamp, started + 7)
+            self.assertEqual(list(app.cpu_history)[1:], [10, 20, 30, 40, 50])
+            self.assertEqual(len(app.cpu_history), 6)
+            self.assertNotIn(None, app.cpu_history)
+            self.assertAlmostEqual(app.snapshot["timestamp"], started + 7)
             self.assertEqual(len(app.gpu_history[snapshot["gpus"][0]["uuid"]]), 6)
 
     async def test_multiple_gpu_histories_scrolling_pause_and_removal(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(160, 44)) as pilot:
             snapshot = demo_snapshot()
-            snapshot["gpus"] = DemoGPUs(8).sample()
+            snapshot["gpus"] = sample_gpus(8, 0)
             snapshot["gpu_status"] = "Simulated GPUs"
             app.accept_snapshot(snapshot)
             first = {gpu["uuid"]: gpu["utilization"] for gpu in snapshot["gpus"]}
@@ -155,10 +138,11 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f"{expected_percent:.1f}%", memory.content.split("\n")[1].plain)
             self.assertEqual(len(memory.content.split("\n")), 4)
             self.assertNotIn("Avail", memory.content.plain)
-            await pilot.press("l")
-            self.assertIn("Shared", memory.content.plain)
-            self.assertNotIn("共用", memory.content.plain)
-            await pilot.press("l")
+            with tempfile.TemporaryDirectory() as config, patch.dict(os.environ, {"XDG_CONFIG_HOME": config}):
+                await pilot.press("l")
+                self.assertIn("Shared", memory.content.plain)
+                self.assertNotIn("共用", memory.content.plain)
+                await pilot.press("l")
             filesystems = app.query_one("#filesystems")
             self.assertIn("Used / Free / Total", filesystems.content.plain)
             self.assertIn("384.0 GiB / 640.0 GiB / 1.0 TiB", filesystems.content.plain)
@@ -742,11 +726,6 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             loads = [app.snapshot["cpu"]["per_core"][i] or 0 for i in indices]
             self.assertEqual(loads, sorted(loads, reverse=True))
             await pilot.press("b")
-            await pilot.pause()
-            capture = os.environ.get("SYSMON_SCREENSHOTS")
-            if capture:
-                Path(capture).mkdir(parents=True, exist_ok=True)
-                save_screenshot(app, "overview.svg", capture)
 
             await pilot.resize_terminal(80, 24)
             await pilot.press("6")
@@ -761,8 +740,6 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("2")
             await pilot.pause()
             self.assertEqual(app.query_one("#cpu-detail-table", DataTable).row_count, len(app.snapshot["cpu"]["core_ids"]))
-            if capture:
-                save_screenshot(app, "compact-cpu.svg", capture)
             await pilot.press("q")
         self.assertTrue(app.stop_sampling.is_set())
 

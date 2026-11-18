@@ -55,6 +55,7 @@ class CollectorTests(unittest.TestCase):
                 self.assertTrue(any(row["mountpoint"] == "/" for row in second["disks"]))
             self.assertTrue(all(row["recv_rate"] is None for row in first["network"]))
             for gpu in second["gpus"]:
+                self.assertFalse(gpu.get("simulated"))
                 pids = [row["pid"] for row in gpu["processes"]]
                 self.assertEqual(len(pids), len(set(pids)))
         finally:
@@ -96,7 +97,6 @@ class CollectorTests(unittest.TestCase):
             collector = Collector()
             try:
                 initialize.assert_called_once()
-                self.assertIsNone(collector._demo_gpu_source)
             finally:
                 collector.close()
         for count in (2, 8):
@@ -104,9 +104,9 @@ class CollectorTests(unittest.TestCase):
                 collector = Collector(demo_gpus=count)
                 try:
                     initialize.assert_not_called()
-                    with patch("sysmon.gpu_demo.time.monotonic", return_value=collector._demo_gpu_source._started):
+                    with patch("sysmon.collector.time.time", return_value=0):
                         first = collector.sample()
-                    with patch("sysmon.gpu_demo.time.monotonic", return_value=collector._demo_gpu_source._started + 3):
+                    with patch("sysmon.collector.time.time", return_value=3):
                         second = collector.sample()
                     self.assertEqual(len(second["gpus"]), count)
                     self.assertEqual(second["gpu_status"], "Simulated GPU source")
@@ -242,7 +242,6 @@ class CollectorTests(unittest.TestCase):
 
     def test_orin_load_units_shared_memory_and_unreadable_sensor(self):
         collector = Collector.__new__(Collector)
-        collector._demo_gpu_source = None
         collector._nvml = None
         with tempfile.TemporaryDirectory(prefix="vital-orin-") as directory:
             collector._jetson_gpu = Path(directory)
@@ -396,7 +395,6 @@ class CollectorTests(unittest.TestCase):
 
     def test_gpu_process_union_joins_host_details_and_preserves_unknowns(self):
         collector = Collector.__new__(Collector)
-        collector._demo_gpu_source = None
         collector._wsl = False
         collector._nvml = SimpleNamespace(
             NVMLError=RuntimeError, nvmlMemory_v2=2, NVML_TEMPERATURE_GPU=0,

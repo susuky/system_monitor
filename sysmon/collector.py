@@ -15,6 +15,8 @@ from typing import Any
 
 import psutil
 
+from .gpu_demo import sample_gpus
+
 if psutil.WINDOWS:
     from . import _windows
     from ._windows_counters import WindowsCounters
@@ -66,8 +68,8 @@ def _cpu_usage(current: Any, previous: Any | None) -> tuple[float | None, dict]:
     if previous is None:
         return None, dict.fromkeys(CPU_FIELDS)
     delta = {
-        field: max(0.0, getattr(current, field, 0) - getattr(previous, field, 0))
-        for field in current._fields
+        field: max(0.0, value - old)
+        for field, value, old in zip(current._fields, current, previous)
     }
     if "guest" in delta:
         # Linux includes guest time in user/nice; count it only once.
@@ -168,7 +170,6 @@ class Collector:
         kernel = self.hardware["kernel"].lower()
         self._wsl = "microsoft" in kernel or "wsl" in kernel
         self.hostname = socket.gethostname()
-        self._logical = psutil.cpu_count() or 1
         self._physical = psutil.cpu_count(logical=False)
         self._boot_time = psutil.boot_time()
         self._previous_cpu = None
@@ -192,12 +193,8 @@ class Collector:
         self._nvml = None
         self._gpu_status = ""
         self._windows_counters = WindowsCounters() if psutil.WINDOWS else None
-        self._demo_gpu_source = None
-        if demo_gpus:
-            from .gpu_demo import DemoGPUs
-
-            self._demo_gpu_source = DemoGPUs(demo_gpus)
-        else:
+        self._demo_gpus = demo_gpus
+        if not demo_gpus:
             self._init_gpu()
 
     def _init_gpu(self) -> None:
@@ -344,7 +341,7 @@ class Collector:
             "percent": percent, "per_core": [row[0] for row in core_results],
             "core_ids": core_ids,
             "times": times, "per_core_times": [row[1] for row in core_results],
-            "logical": len(cores) or self._logical, "physical": self._physical,
+            "logical": len(cores) or psutil.cpu_count() or 1, "physical": self._physical,
             "frequency_mhz": frequency.current if frequency else None,
             "load": None if psutil.WINDOWS else list(os.getloadavg()),
             "temperature": temperature,
@@ -361,13 +358,12 @@ class Collector:
             if not psutil.WINDOWS:
                 raise
             swap = None
-        missing = None if psutil.WINDOWS else 0
         return {
             "total": memory.total, "available": memory.available,
             "used": memory.total - memory.available, "free": memory.free,
             # psutil's Linux cached field already includes SReclaimable.
-            "cached": getattr(memory, "cached", missing), "buffers": getattr(memory, "buffers", missing),
-            "shared": getattr(memory, "shared", missing), "percent": memory.percent,
+            "cached": getattr(memory, "cached", None), "buffers": getattr(memory, "buffers", None),
+            "shared": getattr(memory, "shared", None), "percent": memory.percent,
             "swap": {key: getattr(swap, key, None) for key in ("total", "used", "free", "percent")},
         }
 
@@ -437,15 +433,14 @@ class Collector:
                 if cmdline:
                     arguments = os.fsdecode(cmdline)
                     separator = "\0" if arguments.endswith("\0") else " "
-                    if arguments.endswith(separator):
-                        arguments = arguments[:-1]
-                    arguments = arguments.split(separator)
-                    if len(arguments) == 1 and " " in arguments[0]:
-                        arguments = arguments[0].split(" ")
-                    row["command"] = " ".join(arguments)
-                    expanded = os.path.basename(arguments[0])
-                    if len(row["name"]) >= 15 and expanded.startswith(row["name"]):
-                        row["name"] = expanded
+                    arguments = arguments.removesuffix(separator)
+                    row["command"] = arguments.replace(separator, " ")
+                    if len(row["name"]) >= 15:
+                        # A program can rewrite argv into one space-separated title.
+                        delimiter = separator if separator in arguments else " "
+                        expanded = os.path.basename(arguments.partition(delimiter)[0])
+                        if expanded.startswith(row["name"]):
+                            row["name"] = expanded
                 rows.append(row)
         self._previous_processes = current
         return rows
@@ -543,8 +538,6 @@ class Collector:
     def _gpus(
         self, processes: list[dict], windows_vram: dict[tuple[int, int, int], dict[int, int]] | None = None,
     ) -> tuple[list[dict], str]:
-        if self._demo_gpu_source is not None:
-            return self._demo_gpu_source.sample(), "Simulated GPU source"
         nvml = self._nvml
         if nvml is None:
             if self._jetson_gpu is not None:
@@ -664,7 +657,10 @@ class Collector:
         busy, vram, power = self._windows_counters.sample() if self._windows_counters is not None else (None, None, None)
         cpu, memory = self._cpu(power), self._memory()
         processes = self._processes()
-        gpus, gpu_status = self._gpus(processes, vram)
+        if self._demo_gpus:
+            gpus, gpu_status = sample_gpus(self._demo_gpus, timestamp), "Simulated GPU source"
+        else:
+            gpus, gpu_status = self._gpus(processes, vram)
         return {
             "timestamp": timestamp, "hostname": self.hostname,
             "uptime": max(0.0, timestamp - self._boot_time),

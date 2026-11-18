@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 from . import __version__
+from .formatting import number, size
 from .settings import DEFAULT_LANGUAGE, LANGUAGES, SettingsError, load_language, save_language, translate_status
 
 
@@ -119,21 +120,6 @@ def _parser(language: str = DEFAULT_LANGUAGE) -> argparse.ArgumentParser:
     return parser
 
 
-def _bytes(value: int | float | None) -> str:
-    if value is None:
-        return "—"
-    amount = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
-        if abs(amount) < 1024 or unit == "PiB":
-            return f"{amount:.1f} {unit}"
-        amount /= 1024
-    raise AssertionError("unreachable")
-
-
-def _number(value: int | float | None, unit: str = "") -> str:
-    return "—" if value is None else f"{value:.1f}{unit}"
-
-
 def print_snapshot(
     snapshot: dict[str, Any], *, per_core: bool, console: Console, language: str = DEFAULT_LANGUAGE,
 ) -> None:
@@ -146,28 +132,28 @@ def print_snapshot(
     stamp = datetime.fromtimestamp(snapshot["timestamp"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     console.print(f"{snapshot['hostname']}  {stamp}", style="bold cyan")
     console.print(
-        f"CPU {_number(cpu['percent'], '%')}  "
+        f"CPU {number(cpu['percent'], '%')}  "
         f"{cpu['physical'] or '—'} {t('核心', 'cores')} / {cpu['logical']} {t('執行緒', 'threads')}  "
-        f"{_number(cpu['frequency_mhz'], ' MHz')}  "
-        f"{t('溫度', 'Temp')} {_number(cpu['temperature'], ' °C')}  "
-        f"{t('功率', 'Power')} {_number(cpu['power_watts'], ' W')}"
+        f"{number(cpu['frequency_mhz'], ' MHz')}  "
+        f"{t('溫度', 'Temp')} {number(cpu['temperature'], ' °C')}  "
+        f"{t('功率', 'Power')} {number(cpu['power_watts'], ' W')}"
     )
     if cpu["power_watts"] is None and cpu["power_status"]:
         console.print(translate_status(cpu["power_status"], language), style="dim")
     load = f"Load {' / '.join(f'{value:.2f}' for value in cpu['load'])}  " if cpu["load"] else ""
     console.print(f"{load}{t('程序', 'Processes')} {len(snapshot['processes'])}")
     console.print(
-        f"RAM {t('已用', 'Used')} {_bytes(memory['used'])} / {_bytes(memory['total'])} "
-        f"({_number(memory['percent'], '%')})  {t('可用', 'Available')} {_bytes(memory['available'])}"
+        f"RAM {t('已用', 'Used')} {size(memory['used'])} / {size(memory['total'])} "
+        f"({number(memory['percent'], '%')})  {t('可用', 'Available')} {size(memory['available'])}"
     )
     console.print(
-        f"{t('空閒', 'Free')} {_bytes(memory['free'])}  "
-        f"Cache {_bytes(memory['cached'])}  Buffers {_bytes(memory['buffers'])}  "
-        f"Shared {_bytes(memory['shared'])}"
+        f"{t('空閒', 'Free')} {size(memory['free'])}  "
+        f"Cache {size(memory['cached'])}  Buffers {size(memory['buffers'])}  "
+        f"Shared {size(memory['shared'])}"
     )
     console.print(
-        f"Swap {_bytes(swap['used'])} / {_bytes(swap['total'])} "
-        f"({_number(swap['percent'], '%')})"
+        f"Swap {size(swap['used'])} / {size(swap['total'])} "
+        f"({number(swap['percent'], '%')})"
     )
 
     if per_core:
@@ -181,20 +167,20 @@ def print_snapshot(
         )
         for name, times, busy in rows:
             table.add_row(
-                name, *(_number(times[key]) for key in ("user", "system", "iowait", "idle")),
-                _number(busy),
+                name, *(number(times[key]) for key in ("user", "system", "iowait", "idle")),
+                number(busy),
             )
         console.print(table)
 
     for gpu in snapshot["gpus"]:
         console.print(
-            f"GPU {gpu['index']} · {gpu['name']}  {_number(gpu['utilization'], '%')}"
+            f"GPU {gpu['index']} · {gpu['name']}  {number(gpu['utilization'], '%')}"
         )
         gpu_memory = (t("共用系統 RAM", "Shared system RAM") if gpu.get("memory_shared") else
-                      f"VRAM {_bytes(gpu['memory_used'])} / {_bytes(gpu['memory_total'])}")
+                      f"VRAM {size(gpu['memory_used'])} / {size(gpu['memory_total'])}")
         console.print(
             f"  {gpu_memory}  "
-            f"{_number(gpu['temperature'], ' °C')}  {_number(gpu['power_watts'], ' W')}"
+            f"{number(gpu['temperature'], ' °C')}  {number(gpu['power_watts'], ' W')}"
         )
     if snapshot["gpu_status"]:
         console.print(translate_status(snapshot["gpu_status"], language), style="dim")
@@ -206,24 +192,24 @@ def print_snapshot(
         )
         for row in snapshot["disks"]:
             table.add_row(
-                row["device"], row["mountpoint"], _bytes(row["used"]),
-                _bytes(row["free"]), _bytes(row["total"]),
-                translate_status(row["error"], language) if row.get("error") else _number(row["percent"], "%"),
+                row["device"], row["mountpoint"], size(row["used"]),
+                size(row["free"]), size(row["total"]),
+                translate_status(row["error"], language) if row.get("error") else number(row["percent"], "%"),
             )
         console.print(table)
     if snapshot["disk_io"]:
         table = Table(t("磁碟 I/O", "Disk I/O"), t("讀取 /s", "Read /s"), t("寫入 /s", "Write /s"), t("忙碌", "Busy"), box=None)
         for row in snapshot["disk_io"]:
             table.add_row(
-                row["name"], _bytes(row["read_rate"]), _bytes(row["write_rate"]),
-                _number(row["busy_percent"], "%"),
+                row["name"], size(row["read_rate"]), size(row["write_rate"]),
+                number(row["busy_percent"], "%"),
             )
         console.print(table)
     interfaces = [row for row in snapshot["network"] if row["up"]]
     if interfaces:
         table = Table(t("網路", "Network"), t("接收 /s", "Receive /s"), t("傳送 /s", "Send /s"), box=None)
         for row in interfaces:
-            table.add_row(row["name"], _bytes(row["recv_rate"]), _bytes(row["send_rate"]))
+            table.add_row(row["name"], size(row["recv_rate"]), size(row["send_rate"]))
         console.print(table)
 
 

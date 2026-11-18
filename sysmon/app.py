@@ -27,6 +27,7 @@ from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Footer
 from textual.worker import Worker, WorkerState
 
 from .collector import Collector
+from .formatting import number, size
 from .widgets import CommandDataTable, PlainDataTable
 from .settings import SettingsError, save_language, translate_status
 
@@ -39,19 +40,6 @@ RED = "#ff9393"
 SYSTEM = platform.system()
 
 
-def number(value, suffix="", digits=1):
-    return "—" if value is None else f"{value:.{digits}f}{suffix}"
-
-
-def size(value):
-    if value is None:
-        return "—"
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
-        if abs(value) < 1024 or unit == "PiB":
-            return f"{value:.1f} {unit}"
-        value /= 1024
-
-
 def clean(value):
     """Keep terminal controls and multiline process arguments out of cell content."""
     return " ".join("".join(c for c in str(value) if c.isprintable() or c.isspace()).split())
@@ -62,13 +50,6 @@ def meter(percent, width=12, color=CYAN):
         return Text("—", style=MUTED)
     filled = round(max(0, min(100, percent)) * width / 100)
     return Text.assemble(("▮" * filled, color), ("▮" * (width - filled), "#344657"))
-
-
-def panel_table(*headers):
-    table = Table(expand=True, box=None, padding=(0, 1), header_style=MUTED)
-    for header in headers:
-        table.add_column(header)
-    return table
 
 
 def text_table(headers, rows, widths):
@@ -168,10 +149,6 @@ class ResizingPanel(VerticalScroll):
 
 
 class CommandScreen(ModalScreen):
-    BINDINGS = [
-        Binding("escape", "dismiss", "返回", key_display="Esc"),
-        Binding("ctrl+c", "copy_text", "複製", key_display="Ctrl+C"),
-    ]
     DEFAULT_CSS = """
     CommandScreen { align: center middle; background: #10151c 85%; }
     #command-dialog { width: 90%; height: 85%; border: solid #52ded6;
@@ -276,13 +253,7 @@ class SystemMonitorApp(App):
     """
     BINDINGS = [
         Binding("ctrl+c", "quit", "離開", show=False, priority=True),
-        Binding("q", "quit", "離開"),
-        Binding("space", "pause", "暫停/恢復"),
-        Binding("/", "search", "搜尋"),
-        Binding("c", "sort_cpu", "CPU 排序"),
-        Binding("m", "sort_memory", "記憶體排序"),
         Binding("b", "core_order", "核心排序", show=False),
-        Binding("l", "language", "English"),
         Binding("escape", "clear_search", "清除搜尋", show=False),
         *[Binding(str(i), f"page('{name}')", name, show=False) for i, name in enumerate(
             ("overview", "cpu", "processes", "gpu", "storage", "hardware"), 1)],
@@ -302,9 +273,8 @@ class SystemMonitorApp(App):
         self.process_sort = "cpu"
         self._search_on_process_page = False
         self.stop_sampling = threading.Event()
-        self.history = {"cpu": deque(maxlen=90)}
+        self.cpu_history = deque(maxlen=90)
         self.gpu_history = {}
-        self.history_timestamp = None
         self.table_cache = {}
         self.table_signatures = {}
         self.table_selection = {}
@@ -389,7 +359,7 @@ class SystemMonitorApp(App):
             with VerticalScroll(id="storage"):
                 yield Static(id="storage-label", classes="section-label")
                 yield PlainDataTable(id="storage-filesystems", zebra_stripes=True, cursor_type="row")
-                yield Static(self.t("磁碟 I/O", "Disk I/O"), classes="section-label", id="io-label")
+                yield Static(classes="section-label", id="io-label")
                 yield PlainDataTable(id="storage-io", zebra_stripes=True, cursor_type="row")
                 yield Static(id="network-label", classes="section-label")
                 yield PlainDataTable(id="storage-network", zebra_stripes=True, cursor_type="row")
@@ -445,11 +415,10 @@ class SystemMonitorApp(App):
         for identifier, labels in headings.items():
             self.configure_table(identifier, [(str(i), label, None) for i, label in enumerate(labels)])
         for key, action, label in (("q", "quit", self.t("離開", "Quit")), ("space", "pause", self.t("暫停/恢復", "Pause/Resume")),
-                                   ("/", "search", self.t("搜尋", "Search")), ("c", "sort_cpu", self.t("CPU 排序", "Sort CPU")),
+                                   ("slash", "search", self.t("搜尋", "Search")), ("c", "sort_cpu", self.t("CPU 排序", "Sort CPU")),
                                    ("m", "sort_memory", self.t("記憶體排序", "Sort memory")), ("l", "language", self.t("English", "繁體中文"))):
             # bind() appends, leaving the original description first in the footer.
-            binding = next(iter(Binding.make_bindings([Binding(key, action, label)])))
-            self._bindings.key_to_bindings[binding.key] = [binding]
+            self._bindings.key_to_bindings[key] = [Binding(key, action, label)]
         self.refresh_bindings()
         self.draw()
 
@@ -497,10 +466,9 @@ class SystemMonitorApp(App):
         self.latest = data
         if self.paused:
             return
+        new_sample = self.snapshot is None or data["timestamp"] != self.snapshot["timestamp"]
         self.snapshot = data
-        new_sample = data["timestamp"] != self.history_timestamp
-        self.history_timestamp = data["timestamp"]
-        histories = [(self.history["cpu"], data["cpu"]["percent"])]
+        histories = [(self.cpu_history, data["cpu"]["percent"])]
         current_gpus = set()
         for gpu in data["gpus"]:
             key = gpu.get("uuid") or gpu["index"]
@@ -531,7 +499,6 @@ class SystemMonitorApp(App):
                 self.query_one("#top-line", Static).update(self.t("讀取系統資料…", "Reading system data…"))
             return
         data = self.snapshot
-        cpu, memory = data["cpu"], data["memory"]
         days, remainder = divmod(int(data["uptime"]), 86400)
         hours, remainder = divmod(remainder, 3600)
         state = self.t("已暫停", "Paused") if self.paused else self.t("即時", "Live")
@@ -585,7 +552,7 @@ class SystemMonitorApp(App):
         cpu, memory = data["cpu"], data["memory"]
         width = max(20, self.query_one("#summary-cpu").content_size.width)
         self.update_text("summary-cpu", Text.assemble(
-            metric(cpu["percent"], self.history["cpu"], width, CYAN),
+            metric(cpu["percent"], self.cpu_history, width, CYAN),
             "\n", (self.t("溫度 ", "Temp "), MUTED), number(cpu["temperature"], "°C"),
             (self.t("  功率 ", "  Power "), MUTED), number(cpu["power_watts"], " W")))
         swap = memory["swap"]
@@ -646,11 +613,10 @@ class SystemMonitorApp(App):
         top_height = max(10, min(rows * 2 + 5, available - 8))
         if not narrow:
             self.query_one("#overview-top").styles.height = top_height
+            panel.styles.height = "1fr"
         else:
             self.query_one("#overview-top").styles.height = "auto"
             panel.styles.height = rows * 2 + 5
-        if not narrow:
-            panel.styles.height = "1fr"
         spacious = narrow or top_height >= rows * 2 + 4
         grid = Text()
         bar_width = max(3, width // columns - id_width - 11)
@@ -735,10 +701,7 @@ class SystemMonitorApp(App):
                                    (("temperature", "°C"), ("power_watts", " W"), ("fan_percent", "%"))]],
                                  [(width - 4) // 3] * 3)
             elements.extend([title, usage, memory, Text(""), metrics])
-            if len(self.snapshot["gpus"]) > 1:
-                elements.append(Text(""))
-                continue
-            if not gpu.get("processes_supported", True):
+            if len(self.snapshot["gpus"]) > 1 or not gpu.get("processes_supported", True):
                 elements.append(Text(""))
                 continue
             items = sorted(gpu["processes"], key=lambda p: (-(p.get("gpu_utilization") or 0), -(p["memory"] or 0), p["pid"]))[:8]
@@ -787,7 +750,6 @@ class SystemMonitorApp(App):
         self.update_gpu_command()
 
     def draw_processes(self, identifier, limit=None):
-        table = self.query_one(f"#{identifier}", DataTable)
         search_id = "#overview-search" if identifier == "overview-processes" else "#search"
         search = self.query_one(search_id, Input).value.casefold().strip()
         widths = [8, 10, 8, 10, 10]
@@ -810,7 +772,6 @@ class SystemMonitorApp(App):
             self.update_text("overview-process-count", f"{min(len(processes), 100)} / {len(processes)}", layout=True)
         else:
             self.update_text("process-count", f"{len(processes)} " + self.t("個程序", "processes"), layout=True)
-        if identifier == "process-table":
             self.update_command()
 
     def sync_table(self, identifier, rows):
@@ -866,7 +827,8 @@ class SystemMonitorApp(App):
 
     def draw_hardware(self):
         data = self.snapshot
-        table = panel_table(self.t("項目", "Item"), self.t("資訊", "Details"))
+        table = Table(self.t("項目", "Item"), self.t("資訊", "Details"),
+                      expand=True, box=None, padding=(0, 1), header_style=MUTED)
         for key, label in (("os", self.t("作業系統", "Operating system")), ("kernel", "Kernel"), ("architecture", self.t("架構", "Architecture")), ("cpu_model", "CPU"),
                            ("sockets", self.t("Socket 數", "Sockets")), ("cores_per_socket", self.t("每 Socket 核心", "Cores per socket")), ("threads_per_core", self.t("每核心執行緒", "Threads per core")),
                            ("virtualization", self.t("虛擬化", "Virtualization")), ("cache_l1d", "L1d Cache"), ("cache_l1i", "L1i Cache"),
@@ -1017,15 +979,9 @@ class SystemMonitorApp(App):
 
     @on(DataTable.RowHighlighted, "#gpu-processes")
     def update_gpu_command(self):
-        if not self.snapshot:
-            return
         table = self.query_one("#gpu-processes", DataTable)
         command = self.t("未取得 GPU 程序", "No GPU processes reported")
         if table.row_count:
-            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-            for gpu in self.snapshot["gpus"]:
-                process = next((p for p in gpu["processes"] if f"{gpu['index']}:{p['pid']}" == key), None)
-                if process:
-                    command = f"GPU {gpu['index']}  ·  PID {process['pid']}\n{clean(process.get('command') or process['name'])}"
-                    break
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            command = f"GPU {table.get_cell(key, 'device')}  ·  PID {table.get_cell(key, 'pid')}\n{table.get_cell(key, 'command')}"
         self.update_text("gpu-command", Text(command), layout=True)

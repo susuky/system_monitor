@@ -115,7 +115,7 @@ class WindowsCounters:
 
     def __init__(self):
         self._query = wintypes.HANDLE()
-        self._adapters = {}
+        self.gpu_adapter_key = cache(_gpu_adapter_key)
         if _pdh.PdhOpenQueryW(None, 0, ctypes.byref(self._query)):
             self._query = None
             return
@@ -128,12 +128,6 @@ class WindowsCounters:
         if _pdh.PdhAddEnglishCounterW(self._query, path, 0, ctypes.byref(handle)) == 0:
             return handle
         return None
-
-    def gpu_adapter_key(self, pci_bus_id):
-        # shortcut: LUIDs stay cached until restart, refresh them if live GPU reconnect is needed.
-        if pci_bus_id not in self._adapters:
-            self._adapters[pci_bus_id] = _gpu_adapter_key(pci_bus_id)
-        return self._adapters[pci_bus_id]
 
     def sample(self):
         if not self._query or _pdh.PdhCollectQueryData(self._query):
