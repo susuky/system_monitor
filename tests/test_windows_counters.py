@@ -11,6 +11,27 @@ if sys.platform == "win32":
 
 @unittest.skipUnless(sys.platform == "win32", "uses Windows PDH counter names")
 class WindowsCountersTests(unittest.TestCase):
+    def test_process_owner_is_shared_by_sid_but_commands_stay_live(self):
+        users = {}
+        created = _windows._UNIX_EPOCH + _windows._TICKS_PER_SECOND
+        with patch.object(_windows.psutil, "Process") as process:
+            proc = process.return_value
+            proc.is_running.return_value = True
+            proc.create_time.side_effect = [2.0, 1.0, 1.0, 1.0]
+            proc.as_dict.side_effect = [
+                {"username": "reused-pid", "cmdline": []},
+                {"username": "owner", "cmdline": ["first"]},
+                {"cmdline": ["second", "two words"]},
+                {"username": "other", "cmdline": []},
+            ]
+            self.assertEqual(_windows._process_details(10, created, b"sid", users), ("", ""))
+            self.assertEqual(users, {})
+            self.assertEqual(_windows._process_details(11, created, b"sid", users), ("owner", "first"))
+            self.assertEqual(_windows._process_details(12, created, b"sid", users), ("owner", 'second "two words"'))
+            proc.as_dict.assert_called_with(attrs=("cmdline",))
+            self.assertEqual(_windows._process_details(13, created, None, users), ("other", ""))
+            self.assertEqual(users, {b"sid": "owner"})
+
     def test_hwinfo_uses_live_cpu_package_temperature(self):
         values = {
             "Sensor0": "ASUS motherboard", "Label0": "CPU Package", "Value0": "90 °C", "ValueRaw0": "90",

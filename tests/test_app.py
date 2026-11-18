@@ -101,7 +101,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             for gpu in updated["gpus"]:
                 self.assertIn(gpu["name"], detail)
             await pilot.press("end")
-            await pilot.pause(.3)
+            await pilot.wait_for_scheduled_animations()
             self.assertEqual(stats.scroll_y, stats.max_scroll_y)
             await pilot.press("space")
             changed = deepcopy(updated)
@@ -513,6 +513,34 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("home")
                     await pilot.resize_terminal(120, 34)
 
+    async def test_command_width_tracks_simultaneous_changes_in_terminal_cells(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(80, 24)) as pilot:
+            snapshot = demo_snapshot()
+            processes = snapshot["processes"]
+            processes[2]["command"] = "node " + "x" * 90
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            table = app.query_one("#overview-processes", DataTable)
+            column = table.columns["command"]
+            processes[0]["command"] = "python " + "寬" * 60
+            processes[1]["command"] = "ffmpeg " + "a" * 100
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(column.content_width, cell_len(processes[0]["command"]))
+            processes[0]["command"] = "python"
+            processes[1]["command"] = "ffmpeg"
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(column.content_width, cell_len(processes[2]["command"]))
+            processes[0]["command"] = "python " + "寬" * 75
+            processes[1]["command"] = "ffmpeg " + "a" * 120
+            app.accept_snapshot(snapshot)
+            processes[0]["command"] = "python " + "a" * 100
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(column.content_width, cell_len(processes[1]["command"]))
+
     async def test_removed_long_commands_shrink_the_scrollable_columns(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(120, 34)) as pilot:
@@ -542,7 +570,9 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                     field.value = ""
                     await pilot.pause()
                     field.value = "no-matching-process"
-                    await pilot.pause()
+                    deadline = time.monotonic() + 3
+                    while table.row_count and time.monotonic() < deadline:
+                        await pilot.pause()
                     self.assertEqual(table.row_count, 0)
                     field.value = "4120"
                     await pilot.pause()

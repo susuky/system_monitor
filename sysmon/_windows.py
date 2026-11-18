@@ -186,15 +186,52 @@ def _process_buffer():
         size = max(required.value, size * 2)
 
 
-def _process_details(pid, created):
+class _WtsProcessInfo(ctypes.Structure):
+    _fields_ = [("session", wintypes.DWORD), ("pid", wintypes.DWORD),
+                ("name", wintypes.LPWSTR), ("sid", ctypes.c_void_p)]
+
+
+_wts = ctypes.WinDLL("wtsapi32")
+_wts_processes = ctypes.POINTER(_WtsProcessInfo)
+_wts.WTSEnumerateProcessesW.argtypes = (
+    wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+    ctypes.POINTER(_wts_processes), ctypes.POINTER(wintypes.DWORD),
+)
+_wts.WTSFreeMemory.argtypes = (ctypes.c_void_p,)
+_wts.WTSFreeMemory.restype = None
+_sid_length = ctypes.WinDLL("advapi32").GetLengthSid
+_sid_length.argtypes = (ctypes.c_void_p,)
+_sid_length.restype = wintypes.DWORD
+
+
+def _process_sids():
+    records = _wts_processes()
+    count = wintypes.DWORD()
+    if not _wts.WTSEnumerateProcessesW(None, 0, 1, ctypes.byref(records), ctypes.byref(count)):
+        return {}
+    try:
+        return {row.pid: ctypes.string_at(row.sid, _sid_length(row.sid))
+                for row in records[:count.value] if row.sid}
+    finally:
+        _wts.WTSFreeMemory(records)
+
+
+def _process_details(pid, created, sid, users):
     try:
         process = psutil.Process(pid)
-        details = process.as_dict(attrs=("username", "cmdline"))
-        if details["username"] or details["cmdline"]:
+        # WTS supplies the current token SID. Resolve the account name once
+        # per SID per sample; processes without a visible SID use psutil.
+        known_user = users.get(sid)
+        attrs = ("username", "cmdline") if known_user is None else ("cmdline",)
+        details = process.as_dict(attrs=attrs)
+        user = known_user or details.get("username")
+        if user or details["cmdline"]:
             started = (created - _UNIX_EPOCH) / _TICKS_PER_SECOND
             # psutil returns the FILETIME as a float, with microsecond rounding.
             if abs(process.create_time() - started) < 0.00001 and process.is_running():
-                return details["username"] or "", subprocess.list2cmdline(details["cmdline"] or [])
+                if sid is not None and user:
+                    users[sid] = user
+                return user or "", subprocess.list2cmdline(details["cmdline"] or [])
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     return "", ""
@@ -212,6 +249,7 @@ def processes(previous):
     # One kernel snapshot avoids a full system query per protected PID in psutil.
     buffer, length = _process_buffer()
     stamp = time.monotonic()
+    sids, users = _process_sids(), {}
     base = ctypes.addressof(buffer)
     rows, current = [], {}
     offset = 0
@@ -223,7 +261,7 @@ def processes(previous):
             name = ""
             if image.buffer and base <= image.buffer <= base + length - image.length:
                 name = ctypes.wstring_at(image.buffer, image.length // ctypes.sizeof(ctypes.c_wchar))
-            user, command = _process_details(pid, entry.created)
+            user, command = _process_details(pid, entry.created, sids.get(pid), users)
             status = _process_status(buffer, offset + ctypes.sizeof(_ProcessInfo), entry.threads)
             identity = (pid, entry.created)
             cpu_time = (entry.user_time + entry.kernel_time) / _TICKS_PER_SECOND

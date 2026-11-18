@@ -48,3 +48,13 @@ class PlainDataTable(DataTable):
 
 class CommandDataTable(PlainDataTable):
     BINDINGS = [Binding("enter", "select_cursor", "完整指令", key_display="Enter")]
+
+    def _update_column_widths(self, updated_cells):
+        other_cells = {cell for cell in updated_cells if cell.column_key != "command"}
+        if len(other_cells) != len(updated_cells) and "command" in self.columns:
+            # Commands are single-line Text. Measure the column once per batch,
+            # including rows whose values changed again before Textual went idle.
+            column = self.columns["command"]
+            width = max((cell.cell_len for cell in self.get_column("command")), default=0)
+            column.content_width = max(column.label.cell_len, width)
+        super()._update_column_widths(other_cells)
