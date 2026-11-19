@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import socket
 import subprocess
 import time
@@ -41,6 +42,25 @@ PSEUDO_FILESYSTEMS = {
     "fuse.gvfsd-fuse", "hugetlbfs", "mqueue", "nsfs", "proc", "pstore",
     "rpc_pipefs", "securityfs", "squashfs", "sysfs", "tracefs",
 }
+
+
+def vllm_launch_command(pid: int) -> tuple[int, str] | None:
+    """Find the launch command behind a vLLM worker's rewritten process title."""
+    try:
+        process = psutil.Process(pid)
+        argv = process.cmdline()
+        if not argv or not argv[0].strip().casefold().startswith("vllm::"):
+            return None
+        while (process := process.parent()) is not None and process.pid > 1:
+            argv = process.cmdline()
+            if not argv or not process.is_running():
+                break
+            if not argv[0].strip().casefold().startswith("vllm::"):
+                command = subprocess.list2cmdline(argv) if psutil.WINDOWS else shlex.join(argv)
+                return process.pid, command
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return None
 
 
 def _read_cpu_times(path: Path | None = None) -> tuple[CpuTimes, dict[int, CpuTimes]]:

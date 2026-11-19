@@ -168,6 +168,24 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             visible = "".join(ET.fromstring(app.export_screenshot()).itertext()).replace("\u00a0", " ")
             self.assertIn("Free memory", visible)
 
+    async def test_compact_disk_summary_keeps_drive_and_capacity_on_one_line(self):
+        app = DemoApp(language="zh-TW")
+        async with app.run_test(size=(124, 30)) as pilot:
+            snapshot = demo_snapshot()
+            snapshot["disks"] = [
+                {"mountpoint": "C:\\", "used": 1.6 * 1024**4, "free": 181.3 * 1024**3,
+                 "total": 1.8 * 1024**4, "percent": 90.3},
+                {"mountpoint": "D:\\", "used": 1.8 * 1024**4, "free": 1.9 * 1024**4,
+                 "total": 3.6 * 1024**4, "percent": 48.7},
+            ]
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            filesystems = app.query_one("#filesystems")
+            header, c_drive, d_drive = filesystems.content.plain.splitlines()
+            self.assertEqual(header, "已用 / 剩餘 / 總計")
+            self.assertEqual(c_drive.split(), ["C:\\", "1.6TiB/181.3GiB/1.8TiB", "90.3%"])
+            self.assertEqual(d_drive.split(), ["D:\\", "1.8TiB/1.9TiB/3.6TiB", "48.7%"])
+
     async def test_paused_jetson_gpu_resizes_without_a_process_table(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(160, 44)) as pilot:
@@ -349,6 +367,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                             table = app.query_one(f"#{identifier}", DataTable)
                             self.assertIs(app.focused, table)
                             self.assertEqual(table.fixed_columns, 1)
+                            self.assertEqual(table.horizontal_scrollbar.region.height, 0)
                             self.assertEqual(str(table.get_row_at(table.cursor_row)[0]), "4102")
                             await pilot.press("right")
                             await pilot.pause(.3)

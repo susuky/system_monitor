@@ -26,7 +26,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Footer, Input, Static, Tab, Tabs
 from textual.worker import Worker, WorkerState
 
-from .collector import Collector
+from .collector import Collector, vllm_launch_command
 from .formatting import number, size
 from .widgets import CommandDataTable, PlainDataTable
 from .settings import SettingsError, save_language, translate_status
@@ -227,6 +227,7 @@ class SystemMonitorApp(App):
     #gpu-stats { height: auto; max-height: 50%; }
     #gpu-processes { min-height: 4; }
     DataTable { height: 1fr; background: #10151c; scrollbar-size: 1 1; }
+    CommandDataTable { scrollbar-size-horizontal: 0; }
     DataTable > .datatable--header { background: #171f29; color: #a3b5c5; text-style: bold; }
     DataTable > .datatable--cursor { background: #24414d; color: #f1ffff; }
     DataTable > .datatable--odd-row { background: #141c25; }
@@ -531,9 +532,16 @@ class SystemMonitorApp(App):
             else:
                 lines = [Text(self.t("已用 / 剩餘 / 總計", "Used / Free / Total"), style=MUTED)]
                 for disk in data["disks"]:
-                    lines.append(aligned(Text(clean(disk["mountpoint"])), Text(number(disk["percent"], "%"), style=MINT), disk_width))
-                    lines.append(Text(self.status(disk.get("error")) or f"{size(disk['used'])} / {size(disk['free'])} / {size(disk['total'])}"))
-                filesystems = Text("\n").join(lines)
+                    mount = Text(clean(disk["mountpoint"]))
+                    percent = Text(number(disk["percent"], "%"), style=MINT)
+                    sizes = [size(disk[key]) for key in ("used", "free", "total")]
+                    capacity = " / ".join(sizes)
+                    if mount.cell_len + len(capacity) + percent.cell_len + 2 > disk_width:
+                        capacity = "/".join(value.replace(" ", "") for value in sizes)
+                    details = Text(self.status(disk.get("error")) or capacity)
+                    mount.truncate(max(3, disk_width - details.cell_len - percent.cell_len - 2), overflow="ellipsis")
+                    lines.append(aligned(Text.assemble(mount, " ", details), percent, disk_width))
+                filesystems = Text("\n", no_wrap=True, overflow="ellipsis").join(lines)
             self.update_block("filesystems", filesystems)
         elif active == "cpu":
             self.draw_cpu_details()
@@ -935,9 +943,16 @@ class SystemMonitorApp(App):
 
     def show_command(self, process, device=None):
         title = f"PID {process['pid']}"
+        command = clean(process.get("command") or process["name"])
         if device is not None:
             title = f"GPU {device}  ·  {title}"
-        self.push_screen(CommandScreen(title, clean(process.get("command") or process["name"]), self.language))
+            if command.casefold().startswith("vllm::"):
+                launch = vllm_launch_command(process["pid"])
+                if launch is not None:
+                    pid, args = launch
+                    label = self.t("上層程序", "Ancestor process")
+                    command += f"\n\n{label} PID {pid}\n{clean(args)}"
+        self.push_screen(CommandScreen(title, command, self.language))
 
     @on(DataTable.RowSelected, "#overview-processes")
     @on(DataTable.RowSelected, "#process-table")
