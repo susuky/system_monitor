@@ -21,8 +21,10 @@ from .gpu_demo import sample_gpus
 if psutil.WINDOWS:
     from . import _windows
     from ._windows_counters import WindowsCounters
+    from ._windows_network import WindowsProcessNetwork as ProcessNetwork
 else:
     import pwd
+    from ._linux_network import LinuxProcessNetwork as ProcessNetwork
 
 
 CPU_FIELDS = (
@@ -192,6 +194,7 @@ class Collector:
         self.hostname = socket.gethostname()
         self._physical = psutil.cpu_count(logical=False)
         self._boot_time = psutil.boot_time()
+        self._process_network = ProcessNetwork()
         self._previous_cpu = None
         self._previous_cores = {}
         self._previous_processes: dict[tuple, tuple[float, float]] = {}
@@ -254,6 +257,7 @@ class Collector:
     def close(self) -> None:
         if self._windows_counters is not None:
             self._windows_counters.close()
+        self._process_network.close()
         if self._nvml is not None:
             try:
                 self._nvml.nvmlShutdown()
@@ -676,7 +680,18 @@ class Collector:
         timestamp = time.time()
         busy, vram, power = self._windows_counters.sample() if self._windows_counters is not None else (None, None, None)
         cpu, memory = self._cpu(power), self._memory()
+        network = self._network()
+        # Take the Windows event cutoff before enumerating names for these PIDs.
+        windows_traffic = self._process_network.sample(()) if psutil.WINDOWS else None
         processes = self._processes()
+        rates, network_status = (windows_traffic if windows_traffic is not None
+                                 else self._process_network.sample(row["pid"] for row in processes))
+        names = {row["pid"]: row["name"] for row in processes if row["pid"] in rates}
+        network_processes = [
+            {"pid": pid, "name": names.get(pid, ""), "recv_rate": received, "send_rate": sent}
+            for pid, (received, sent) in sorted(rates.items(), key=lambda item: (-sum(item[1]), item[0]))
+        ]
+        interfaces = self._process_network.interfaces
         if self._demo_gpus:
             gpus, gpu_status = sample_gpus(self._demo_gpus, timestamp), "Simulated GPU source"
         else:
@@ -686,6 +701,9 @@ class Collector:
             "uptime": max(0.0, timestamp - self._boot_time),
             "cpu": cpu, "memory": memory, "processes": processes,
             "disks": self._disks(), "disk_io": self._disk_io(busy),
-            "network": self._network(), "gpus": gpus, "gpu_status": gpu_status,
+            "network": network, "gpus": gpus, "gpu_status": gpu_status,
+            "network_processes": network_processes, "network_process_status": network_status,
+            "network_process_scope": self._process_network.scope,
+            "network_capture_interfaces": sorted(interfaces) if interfaces is not None else None,
             "hardware": self.hardware,
         }

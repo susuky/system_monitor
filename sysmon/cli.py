@@ -207,10 +207,23 @@ def print_snapshot(
         console.print(table)
     interfaces = [row for row in snapshot["network"] if row["up"]]
     if interfaces:
-        table = Table(t("網路", "Network"), t("接收 /s", "Receive /s"), t("傳送 /s", "Send /s"), box=None)
+        table = Table(t("網路介面", "Network interfaces"), t("接收 /s", "Receive /s"), t("傳送 /s", "Send /s"), box=None)
         for row in interfaces:
             table.add_row(row["name"], size(row["recv_rate"]), size(row["send_rate"]))
         console.print(table)
+    processes = snapshot.get("network_processes", [])
+    network_status = snapshot.get("network_process_status", "")
+    scope = snapshot.get("network_process_scope", "tcp_udp" if snapshot["hardware"]["os"] == "Windows" else "tcp")
+    if processes:
+        protocols = "TCP" if scope == "tcp" else "TCP/UDP"
+        title = f"{protocols} {t('程序流量', 'process traffic')}"
+        table = Table("PID", t("程序", "Process"), t("接收 /s", "Receive /s"), t("傳送 /s", "Send /s"),
+                      title=title, title_justify="left", box=None)
+        for row in processes:
+            table.add_row(str(row["pid"]), row["name"] or "—", size(row["recv_rate"]), size(row["send_rate"]))
+        console.print(table)
+    elif network_status:
+        console.print(translate_status(network_status, language), style="dim")
 
 
 def _sample(args: argparse.Namespace, language: str) -> int:

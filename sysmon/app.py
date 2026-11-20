@@ -222,8 +222,10 @@ class SystemMonitorApp(App):
     #overview-process-controls { height: 2; }
     #overview-process-count { width: auto; color: #a3b5c5; padding: 0 1; }
     #process-count { width: auto; padding: 1; }
-    #process-command-scroll, #gpu-command-scroll { height: 4; border-top: solid #344657; padding: 0 1; }
-    #process-command, #gpu-command { height: auto; }
+    #process-command-scroll, #gpu-command-scroll, #network-command-scroll {
+        height: 4; border-top: solid #344657; padding: 0 1;
+    }
+    #process-command, #gpu-command, #network-command { height: auto; }
     #gpu-stats { height: auto; max-height: 50%; }
     #gpu-processes { min-height: 4; }
     DataTable { height: 1fr; background: #10151c; scrollbar-size: 1 1; }
@@ -234,6 +236,8 @@ class SystemMonitorApp(App):
     #cpu-detail-summary { padding: 1; }
     #cpu-detail-table { height: 1fr; }
     #storage { padding: 0 1; }
+    #storage-network-processes { height: 8; }
+    #network-process-status { height: auto; color: #a3b5c5; }
     #storage-filesystems { height: 12; }
     #storage-io { height: 12; }
     #storage-network { height: 14; }
@@ -358,6 +362,11 @@ class SystemMonitorApp(App):
                 with VerticalScroll(id="gpu-command-scroll"):
                     yield Static(id="gpu-command")
             with VerticalScroll(id="storage"):
+                yield Static(id="network-process-label", classes="section-label")
+                yield Static(id="network-process-status")
+                yield CommandDataTable(id="storage-network-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
+                with VerticalScroll(id="network-command-scroll"):
+                    yield Static(id="network-command")
                 yield Static(id="storage-label", classes="section-label")
                 yield PlainDataTable(id="storage-filesystems", zebra_stripes=True, cursor_type="row")
                 yield Static(classes="section-label", id="io-label")
@@ -592,14 +601,32 @@ class SystemMonitorApp(App):
         else:
             summary = Text(self.status(data["gpu_status"]) or self.t("未偵測到 NVIDIA GPU", "No NVIDIA GPU detected"), style=MUTED)
         self.update_text("summary-gpu", summary)
+        self.draw_network_summary()
+
+    def network_process_status(self):
+        return self.status(self.snapshot.get("network_process_status")) or self.t("未偵測到程序流量", "No process traffic detected")
+
+    def draw_network_summary(self):
+        data = self.snapshot
+        width = self.query_one("#summary-network").content_size.width
+        measured = data.get("network_capture_interfaces")
         interfaces = [
             n for n in data["network"] if n["up"] and n["name"] != "lo"
+            and (measured is None or n["name"] in measured)
             and not (n["addresses"] and all(ip_address(address).is_loopback for address in n["addresses"]))
         ]
         receive = sum(n["recv_rate"] or 0 for n in interfaces) if any(n["recv_rate"] is not None for n in interfaces) else None
         send = sum(n["send_rate"] or 0 for n in interfaces) if any(n["send_rate"] is not None for n in interfaces) else None
-        network = Text.assemble((f"↓ {size(receive)}/s", f"bold {CYAN}"),
-                                "  " if width >= 40 else "\n", (f"↑ {size(send)}/s", f"bold {MINT}"))
+        down = Text(f"↓ {size(receive)}/s", style=f"bold {CYAN}")
+        up = Text(f"↑ {size(send)}/s", style=f"bold {MINT}")
+        split = down.cell_len + 2 + up.cell_len > width
+        network = Text.assemble(down, "\n" if split else "  ", up)
+        for row in data.get("network_processes", [])[:2]:
+            name = clean(row["name"]) or str(row["pid"])
+            rate = size(row["recv_rate"] + row["send_rate"])
+            link = Style(underline=True, meta={"@click": f"app.network_command({row['pid']})"})
+            network.append("\n")
+            network.append_text(aligned(Text().append(name, link), Text(f"{rate}/s"), width))
         self.update_text("summary-network", network)
 
     def core_indices(self):
@@ -829,6 +856,33 @@ class SystemMonitorApp(App):
 
     def draw_storage(self):
         data = self.snapshot
+        processes = data.get("network_processes", [])
+        scope = data.get("network_process_scope", "tcp_udp" if SYSTEM == "Windows" else "tcp")
+        protocols = "TCP+UDP" if scope in ("packet", "tcp_udp") else "TCP"
+        self.update_text("network-process-label", f"{protocols} {self.t('程序流量', 'process traffic')}")
+        table = self.query_one("#storage-network-processes", DataTable)
+        table.display = bool(processes)
+        self.query_one("#network-command-scroll").display = table.display
+        status = self.query_one("#network-process-status", Static)
+        status.display = not processes
+        if status.display:
+            self.update_text("network-process-status", self.network_process_status(), layout=True)
+        if processes:
+            name_width = max(8, min(32, self.size.width - 43))
+            self.configure_table("storage-network-processes", [
+                ("pid", "PID", 10), ("name", self.t("程序", "Process"), name_width),
+                ("receive", self.t("接收/s", "Receive/s"), 11), ("send", self.t("傳送/s", "Send/s"), 11),
+                ("command", self.t("指令", "Command"), None),
+            ])
+        commands = {row["pid"]: row["command"] for row in data["processes"]} if processes else {}
+        self.sync_table("storage-network-processes", [
+            (str(row["pid"]), [str(row["pid"]), Text(clean(row["name"]) or "—", overflow="ellipsis", no_wrap=True),
+                               Text(size(row["recv_rate"]), justify="right"),
+                               Text(size(row["send_rate"]), justify="right"),
+                               clean(row.get("command") or commands.get(row["pid"]) or row["name"]) or "—"])
+            for row in processes
+        ])
+        self.update_network_command()
         self.sync_table("storage-filesystems", [(str(i), [clean(d["mountpoint"]), clean(d["device"]), d["fstype"], size(d["used"]), size(d["free"]), size(d["total"]), self.status(d.get("error")) or number(d["percent"])]) for i, d in enumerate(data["disks"])])
         self.sync_table("storage-io", [(d["name"], [d["name"], size(d["read_rate"]), size(d["write_rate"]), number(d["read_iops"]), number(d["write_iops"]), number(d["busy_percent"])]) for d in data["disk_io"]])
         self.sync_table("storage-network", [(n["name"], [n["name"], self.t("連線", "Up") if n["up"] else self.t("未連線", "Down"), size(n["recv_rate"]), size(n["send_rate"]), size(n["received"]), size(n["sent"]), ", ".join(n["addresses"])]) for n in data["network"]])
@@ -857,13 +911,16 @@ class SystemMonitorApp(App):
     def tab_changed(self, event):
         self.query_one("#content", ContentSwitcher).current = event.tab.id.removeprefix("tab-")
         self.draw()
-        identifier = {"tab-overview": "overview-processes", "tab-processes": "process-table", "tab-gpu": "gpu-processes"}.get(event.tab.id)
+        identifier = {"tab-overview": "overview-processes", "tab-processes": "process-table", "tab-gpu": "gpu-processes",
+                      "tab-storage": "storage-network-processes"}.get(event.tab.id)
         if event.tab.id == "tab-processes" and self._search_on_process_page:
             identifier = "search"
         self._search_on_process_page = False
         if identifier:
             if identifier == "gpu-processes" and not self.query_one("#gpu-processes").display:
                 identifier = "gpu-stats"
+            if identifier == "storage-network-processes" and not self.query_one("#storage-network-processes").display:
+                identifier = "storage"
             self.query_one(f"#{identifier}").focus(scroll_visible=False)
 
     def action_page(self, name):
@@ -943,7 +1000,7 @@ class SystemMonitorApp(App):
 
     def show_command(self, process, device=None):
         title = f"PID {process['pid']}"
-        command = clean(process.get("command") or process["name"])
+        command = clean(process.get("command") or process["name"]) or "—"
         if device is not None:
             title = f"GPU {device}  ·  {title}"
             if command.casefold().startswith("vllm::"):
@@ -957,12 +1014,15 @@ class SystemMonitorApp(App):
     @on(DataTable.RowSelected, "#overview-processes")
     @on(DataTable.RowSelected, "#process-table")
     @on(DataTable.RowSelected, "#gpu-processes")
+    @on(DataTable.RowSelected, "#storage-network-processes")
     def command_selected(self, event):
         if not self.snapshot or event.row_key not in event.data_table.rows:
             return
         if event.data_table.id == "gpu-processes":
             device, pid = map(int, event.row_key.value.split(":"))
             self.action_gpu_command(device, pid)
+        elif event.data_table.id == "storage-network-processes":
+            self.action_network_command(int(event.row_key.value))
         else:
             pid = int(str(event.data_table.get_cell(event.row_key, "pid")))
             process = next((p for p in self.snapshot["processes"] if p["pid"] == pid), None)
@@ -978,6 +1038,15 @@ class SystemMonitorApp(App):
                 if process:
                     self.show_command(process, device)
                 return
+
+    def action_network_command(self, pid):
+        if self.snapshot:
+            process = next((p for p in self.snapshot.get("network_processes", []) if p["pid"] == pid), None)
+            if process:
+                if not process.get("command"):
+                    command = next((p["command"] for p in self.snapshot["processes"] if p["pid"] == pid), "")
+                    process = {**process, "command": command}
+                self.show_command(process)
 
     @on(DataTable.RowHighlighted, "#process-table")
     def update_command(self):
@@ -1000,3 +1069,12 @@ class SystemMonitorApp(App):
             key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
             command = f"GPU {table.get_cell(key, 'device')}  ·  PID {table.get_cell(key, 'pid')}\n{table.get_cell(key, 'command')}"
         self.update_text("gpu-command", Text(command), layout=True)
+
+    @on(DataTable.RowHighlighted, "#storage-network-processes")
+    def update_network_command(self):
+        table = self.query_one("#storage-network-processes", DataTable)
+        command = ""
+        if table.row_count and table.is_valid_coordinate(table.cursor_coordinate):
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            command = f"PID {table.get_cell(key, 'pid')}\n{table.get_cell(key, 'command')}"
+        self.update_text("network-command", Text(command), layout=True)

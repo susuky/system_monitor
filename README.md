@@ -25,14 +25,18 @@ Screenshots use sample data.
 
 | Tab | Contents |
 | --- | --- |
-| Overview | CPU, memory, GPU, and network summaries; per-core load; process search; disk capacity |
+| Overview | CPU, memory, GPU, and network summaries, plus top network processes, per-core load, process search, and disk capacity |
 | CPU | Usage, user, sys, iowait, and idle time for each logical core, plus core, socket, and NUMA topology |
 | Processes | Sort by CPU or memory; search by name, full command, PID, or user |
 | GPU | Usage, VRAM, temperature, power, and fan speed for each NVIDIA GPU; GPU%, CPU%, VRAM, and RAM for compute and graphics processes |
-| Disks / Network | Filesystem capacity, disk read/write rates and IOPS, and traffic for each network interface |
+| Disks / Network | Per-process receive and send rates, network interfaces, filesystem capacity, disk I/O and IOPS |
 | Hardware | CPU model, caches, OS version, and memory, cache, and swap details |
 
 Wide terminals display core load in multiple columns. Narrow terminals use a scrollable vertical layout. The top summaries are hidden below 32 rows; memory details remain available in the Hardware tab.
+
+Click a network process in the overview to see its command. Press `5` for the receive and send rates of each process, ranked by combined rate. Click a row or press Enter to open its full command.
+
+Run `sudo .venv/bin/vital` on Linux or WSL2 to measure TCP and UDP. A standard launch reads TCP socket counters. On Windows, run Vital as administrator to measure TCP and UDP.
 
 ## Getting Started
 

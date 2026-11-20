@@ -21,6 +21,16 @@ from sysmon.settings import load_language
 from scripts.capture_demo import DemoApp, demo_snapshot
 
 
+def click_action_position(widget, action):
+    for y, line in enumerate(widget.render_lines(widget.size.region)):
+        x = 0
+        for segment in line:
+            if segment.style and segment.style.meta.get("@click") == action:
+                return x, y
+            x += cell_len(segment.text)
+    return None
+
+
 class ResourceRenderingTests(unittest.TestCase):
     def test_fixed_percent_scale_width_without_time_labels(self):
         for width in (20, 26, 36, 64, 120):
@@ -54,6 +64,80 @@ class ResourceRenderingTests(unittest.TestCase):
 
 
 class AppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_network_processes_fit_summary_and_compact_storage(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(160, 44)) as pilot:
+            snapshot = demo_snapshot()
+            download = '/usr/bin/python3 "download 台灣.py" --output "[literal]"'
+            upload = '/usr/bin/python3 "upload 台灣.py" ' + '--input "[literal]" ' * 30 + "UPLOAD_END"
+            snapshot["processes"][0].update(pid=456, name="downloader", command=download)
+            snapshot["network_processes"] = [
+                {"pid": 456, "name": "downloader", "recv_rate": 8 * 1024**2, "send_rate": 1024},
+                {"pid": 123, "name": "同一個很長的程序名稱" * 4, "command": upload,
+                 "recv_rate": 1024, "send_rate": 2 * 1024**2},
+            ]
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            summary = app.query_one("#summary-network")
+            lines = summary.content.split("\n")
+            self.assertLessEqual(len(lines), summary.content_size.height)
+            self.assertTrue(all(line.cell_len <= summary.content_size.width for line in lines))
+            self.assertTrue(any("downloader" in line.plain and "8.0 MiB/s" in line.plain for line in lines))
+            position = click_action_position(summary, "app.network_command(456)")
+            self.assertIsNotNone(position)
+            self.assertTrue(await pilot.click("#summary-network", offset=position))
+            self.assertIsInstance(app.screen, CommandScreen)
+            self.assertEqual(app.screen.query_one("#command-text").content.plain, download)
+            await pilot.press("escape")
+
+            await pilot.resize_terminal(80, 24)
+            await pilot.press("5")
+            table = app.query_one("#storage-network-processes", DataTable)
+            preview = app.query_one("#network-command")
+            self.assertEqual(table.row_count, 2)
+            self.assertEqual(table.get_row_at(0)[0].plain, "456")
+            self.assertEqual(table.get_row_at(1)[3].plain, "2.0 MiB")
+            rate_columns = sum(table.columns[key].get_render_width(table) for key in ("pid", "name", "receive", "send"))
+            self.assertLessEqual(rate_columns, table.size.width)
+            self.assertEqual(app.focused, table)
+            self.assertIn(download, preview.content.plain)
+            await pilot.press("down")
+            self.assertEqual(table.cursor_row, 1)
+            self.assertIn(upload, preview.content.plain)
+
+            snapshot = deepcopy(snapshot)
+            snapshot["network_processes"].reverse()
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            self.assertEqual(table.get_row_at(table.cursor_row)[0].plain, "123")
+            self.assertIn(upload, preview.content.plain)
+            await pilot.press("tab", "end")
+            preview_scroll = app.query_one("#network-command-scroll")
+            self.assertIs(app.focused, preview_scroll)
+            self.assertGreater(preview_scroll.max_scroll_y, 0)
+            self.assertEqual(preview_scroll.scroll_y, preview_scroll.max_scroll_y)
+            await pilot.press("shift+tab")
+            self.assertIs(app.focused, table)
+            self.assertTrue(await pilot.click(table, offset=(2, table.header_height)))
+            self.assertIsInstance(app.screen, CommandScreen)
+            command_text = app.screen.query_one("#command-text")
+            self.assertEqual(command_text.content.plain, upload)
+            last_line = command_text.size.height - 1
+            end_x = cell_len(command_text.render_line(last_line).text.rstrip())
+            await pilot.mouse_down(command_text, offset=(0, 0))
+            await pilot.mouse_up(command_text, offset=(end_x, last_line))
+            await pilot.press("ctrl+c")
+            self.assertEqual(app.clipboard, upload)
+            await pilot.press("escape")
+            self.assertIs(app.focused, table)
+
+            snapshot["network_processes"] = []
+            snapshot["network_process_status"] = "以系統管理員身分開啟 Vital"
+            app.accept_snapshot(snapshot)
+            self.assertFalse(table.display)
+            self.assertFalse(app.query_one("#network-command-scroll").display)
+            self.assertEqual(app.query_one("#network-process-status").content, "Run Vital as administrator")
+
     async def test_consecutive_history_without_delay_gaps_or_pause_duplicates(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(160, 44)) as pilot:
@@ -72,6 +156,34 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(None, app.cpu_history)
             self.assertAlmostEqual(app.snapshot["timestamp"], started + 7)
             self.assertEqual(len(app.gpu_history[snapshot["gpus"][0]["uuid"]]), 6)
+
+    async def test_network_summary_shows_selected_interfaces_and_two_processes(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(160, 44)) as pilot:
+            snapshot = demo_snapshot()
+            iface = snapshot["network"][0]
+            snapshot["network"].append({**iface, "name": "bridge-port", "recv_rate": 128 * 1024**2})
+            snapshot["network_processes"] = [
+                {"pid": pid, "name": name, "recv_rate": rate * 1024**2, "send_rate": 0}
+                for pid, name, rate in ((10, "download", 6), (20, "sync", 4), (30, "hidden", 1))
+            ]
+            snapshot["network_capture_interfaces"] = [iface["name"]]
+            snapshot["network_process_scope"] = "packet"
+            app.accept_snapshot(snapshot)
+            await pilot.pause()
+            summary = app.query_one("#summary-network")
+            self.assertEqual(summary.border_title, "Network")
+            self.assertEqual([line.split() for line in summary.content.plain.splitlines()],
+                             [["↓", "12.4", "MiB/s", "↑", "2.1", "MiB/s"],
+                              ["download", "6.0", "MiB/s"], ["sync", "4.0", "MiB/s"]])
+            await pilot.press("5")
+            label = app.query_one("#network-process-label")
+            self.assertEqual(label.content, "TCP+UDP process traffic")
+            self.assertFalse(app.query_one("#network-process-status").display)
+            self.assertEqual(app.query_one("#storage-network-processes", DataTable).row_count, 3)
+            snapshot["network_process_scope"] = "tcp"
+            app.accept_snapshot(snapshot)
+            self.assertEqual(label.content, "TCP process traffic")
 
     async def test_multiple_gpu_histories_scrolling_pause_and_removal(self):
         app = DemoApp(language="en")
@@ -359,8 +471,12 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                     snapshot = demo_snapshot()
                     snapshot["processes"][0]["command"] = command
                     snapshot["gpus"][0]["processes"][0]["command"] = command
+                    snapshot["network_processes"] = [
+                        {"pid": 4102, "name": "python", "command": command, "recv_rate": 1024, "send_rate": 0}
+                    ]
                     app.accept_snapshot(snapshot)
-                    for key, identifier in (("1", "overview-processes"), ("3", "process-table"), ("4", "gpu-processes")):
+                    for key, identifier in (("1", "overview-processes"), ("3", "process-table"),
+                                            ("4", "gpu-processes"), ("5", "storage-network-processes")):
                         with self.subTest(table=identifier):
                             await pilot.press(key)
                             await pilot.pause()
@@ -633,17 +749,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("1")
             await pilot.pause()
             compact = app.query_one("#gpu-overview")
-            target = "app.gpu_command(0,4102)"
-            position = None
-            for y, line in enumerate(compact.render_lines(compact.size.region)):
-                x = 0
-                for segment in line:
-                    if segment.style and segment.style.meta.get("@click") == target:
-                        position = (x, y)
-                        break
-                    x += cell_len(segment.text)
-                if position is not None:
-                    break
+            position = click_action_position(compact, "app.gpu_command(0,4102)")
             self.assertIsNotNone(position, "The compact GPU PID must open its full command")
             self.assertTrue(await pilot.click("#gpu-overview", offset=position))
             self.assertIsInstance(app.screen, CommandScreen)

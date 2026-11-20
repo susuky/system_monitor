@@ -71,6 +71,8 @@ _STATUS_EN = {
     "無權讀取 CPU 功耗": "Permission denied reading CPU power",
     "CPU 功耗感測器讀取失敗": "Cannot read CPU power sensor",
     "等待下一次取樣": "Waiting for next sample",
+    "無法讀取程序流量": "Process traffic unavailable",
+    "以系統管理員身分開啟 Vital": "Run Vital as administrator",
     "CPU 功耗計數器已重設": "CPU power counter reset",
     "未安裝 NVIDIA GPU 支援（nvidia-ml-py）": "NVIDIA GPU support not installed (nvidia-ml-py)",
     "無法讀取 NVIDIA GPU": "Cannot read NVIDIA GPU",
