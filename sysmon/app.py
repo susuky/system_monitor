@@ -27,7 +27,7 @@ from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Footer
 from textual.worker import Worker, WorkerState
 
 from .collector import Collector, vllm_launch_command
-from .formatting import number, size
+from .formatting import memory_speed, number, size
 from .widgets import CommandDataTable, PlainDataTable
 from .settings import SettingsError, save_language, translate_status
 
@@ -37,6 +37,7 @@ MINT = "#aff5cf"
 AMBER = "#ffcf70"
 MUTED = "#a3b5c5"
 RED = "#ff9393"
+SPARK_BLOCKS = " ▁▂▃▄▅▆▇█"
 SYSTEM = platform.system()
 
 
@@ -84,14 +85,13 @@ def metric(value, values, width, color):
     points = [None] * (plot_width - len(points)) + points
     levels = [None if point is None else round(max(0, min(100, point)) * 24 / 100) for point in points]
     rows = []
-    chars = " ▁▂▃▄▅▆▇█"
     for row, label in enumerate(("100", " 50", "  0")):
         left = Text(lines[row], style=f"bold {color}")
         left.pad_right(max(0, value_width - left.cell_len))
         cells = []
         for level in levels:
             filled = 0 if level is None else max(0, min(8, level - (2 - row) * 8))
-            cells.append(chars[filled] if filled else ("▁" if row == 2 and level == 0 else " "))
+            cells.append(SPARK_BLOCKS[filled] if filled else ("▁" if row == 2 and level == 0 else " "))
         rows.append(Text.assemble(left, (label + "┤", MUTED), ("".join(cells), color)))
     return Text("\n").join(rows)
 
@@ -198,6 +198,8 @@ class SystemMonitorApp(App):
     Underline > .underline--bar { color: #52ded6; }
     #summary { grid-size: 4; grid-gutter: 0; height: 6; }
     .summary { border: solid #455766; padding: 0 1; height: 6; border-title-color: #a3b5c5; }
+    #summary-cpu { border-subtitle-align: right; border-subtitle-color: #52ded6; }
+    #summary-memory { border-subtitle-align: right; border-subtitle-color: #aff5cf; }
     #content { height: 1fr; }
     #overview { overflow: hidden hidden; }
     #overview-top { height: 21; }
@@ -207,6 +209,8 @@ class SystemMonitorApp(App):
     #gpu-panel, #filesystem-panel { width: 1fr; }
     #gpu-panel, #filesystem-panel { scrollbar-gutter: stable; }
     #cores, #gpu-overview, #filesystems, #cpu-detail-summary, #gpu-detail, #hardware-detail { height: auto; }
+    #overview-disk-throughput { height: 2; }
+    #storage-disk-throughput { height: 3; margin-top: 1; }
     #core-scroll { height: 1fr; overflow-x: hidden; }
     #core-footer { height: 2; border-top: solid #344657; color: #a3b5c5; }
     #core-controls { height: 1; align-horizontal: right; margin-bottom: 1; }
@@ -280,6 +284,7 @@ class SystemMonitorApp(App):
         self.stop_sampling = threading.Event()
         self.cpu_history = deque(maxlen=90)
         self.gpu_history = {}
+        self.disk_history = deque(maxlen=90)
         self.table_cache = {}
         self.table_signatures = {}
         self.table_selection = {}
@@ -339,6 +344,7 @@ class SystemMonitorApp(App):
                             yield Static(id="overview-process-count")
                         yield CommandDataTable(id="overview-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
                     with ResizingPanel(id="filesystem-panel", classes="panel"):
+                        yield Static(id="overview-disk-throughput")
                         yield Static(id="filesystems")
             with Vertical(id="cpu"):
                 yield Static(id="cpu-detail-summary")
@@ -361,7 +367,8 @@ class SystemMonitorApp(App):
                 yield CommandDataTable(id="gpu-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
                 with VerticalScroll(id="gpu-command-scroll"):
                     yield Static(id="gpu-command")
-            with VerticalScroll(id="storage"):
+            with ResizingPanel(id="storage"):
+                yield Static(id="storage-disk-throughput")
                 yield Static(id="network-process-label", classes="section-label")
                 yield Static(id="network-process-status")
                 yield CommandDataTable(id="storage-network-processes", zebra_stripes=True, cursor_type="row", fixed_columns=1)
@@ -478,7 +485,9 @@ class SystemMonitorApp(App):
             return
         new_sample = self.snapshot is None or data["timestamp"] != self.snapshot["timestamp"]
         self.snapshot = data
-        histories = [(self.cpu_history, data["cpu"]["percent"])]
+        disk = data.get("disk_throughput", {})
+        histories = [(self.cpu_history, data["cpu"]["percent"]),
+                     (self.disk_history, (disk.get("read_rate"), disk.get("write_rate")))]
         current_gpus = set()
         for gpu in data["gpus"]:
             key = gpu.get("uuid") or gpu["index"]
@@ -527,31 +536,8 @@ class SystemMonitorApp(App):
             self.draw_cores()
             self.update_block("gpu-overview", self.gpu_view(compact=True))
             self.draw_processes("overview-processes", limit=100)
-            disk_width = self.query_one("#filesystems").content_size.width
-            if disk_width >= 64:
-                headers = self.t(("掛載點", "已用", "剩餘", "總計", "使用率"), ("Mount", "Used", "Free", "Total", "Usage"))
-                mount_width = min(16, disk_width // 5)
-                usage_width = disk_width - mount_width - 38
-                rows = []
-                for disk in data["disks"]:
-                    usage = Text.assemble(meter(disk["percent"], max(1, usage_width - 7), MINT), f" {number(disk['percent'], '%')}")
-                    rows.append((disk["mountpoint"], size(disk["used"]), size(disk["free"]), size(disk["total"]),
-                                 self.status(disk.get("error")) or usage))
-                filesystems = text_table(headers, rows, (mount_width, 10, 10, 10, usage_width))
-            else:
-                lines = [Text(self.t("已用 / 剩餘 / 總計", "Used / Free / Total"), style=MUTED)]
-                for disk in data["disks"]:
-                    mount = Text(clean(disk["mountpoint"]))
-                    percent = Text(number(disk["percent"], "%"), style=MINT)
-                    sizes = [size(disk[key]) for key in ("used", "free", "total")]
-                    capacity = " / ".join(sizes)
-                    if mount.cell_len + len(capacity) + percent.cell_len + 2 > disk_width:
-                        capacity = "/".join(value.replace(" ", "") for value in sizes)
-                    details = Text(self.status(disk.get("error")) or capacity)
-                    mount.truncate(max(3, disk_width - details.cell_len - percent.cell_len - 2), overflow="ellipsis")
-                    lines.append(aligned(Text.assemble(mount, " ", details), percent, disk_width))
-                filesystems = Text("\n", no_wrap=True, overflow="ellipsis").join(lines)
-            self.update_block("filesystems", filesystems)
+            self.draw_disk_throughput("overview-disk-throughput")
+            self.draw_filesystems()
         elif active == "cpu":
             self.draw_cpu_details()
         elif active == "processes":
@@ -564,16 +550,102 @@ class SystemMonitorApp(App):
         elif active == "hardware":
             self.draw_hardware()
 
+    def draw_disk_throughput(self, identifier, *, detail=False):
+        width = self.query_one(f"#{identifier}", Static).content_size.width
+        if not width:
+            return
+        labels = tuple(map(Text, self.t(("讀取", "寫入"), ("Read", "Write"))))
+        readings = self.disk_history[-1]
+        rates = [Text(f"{size(value)}/s" if value is not None else "—") for value in readings]
+        label_width = max(label.cell_len for label in labels)
+        rate_width = max(12, *(rate.cell_len for rate in rates))
+        prefix_width = label_width + 1 + rate_width
+        plot_width = min(self.disk_history.maxlen, max(0, width - prefix_width - 2))
+        samples = list(self.disk_history)[-plot_width:] if plot_width else []
+        peak = max((value for sample in samples for value in sample if value is not None), default=0)
+        lines = []
+        if detail:
+            title = Text(self.t("磁碟讀寫", "Disk throughput"), style=f"bold {CYAN}")
+            if peak:
+                scale = Text(f"0–{size(peak)}/s", style=MUTED)
+                if title.cell_len + scale.cell_len + 2 <= width:
+                    aligned(title, scale, prefix_width + 2 + plot_width)
+            lines.append(title)
+        for index, (label, rate, color) in enumerate(zip(labels, rates, (CYAN, MINT))):
+            label.stylize(color)
+            rate.stylize(f"bold {color}" if readings[index] is not None else MUTED)
+            line = aligned(label, rate, min(width, prefix_width))
+            if samples:
+                blocks = []
+                for sample in samples:
+                    value = sample[index]
+                    if value is None:
+                        blocks.append(" ")
+                    elif value == 0:
+                        blocks.append("·")
+                    else:
+                        blocks.append(SPARK_BLOCKS[max(1, round(value * 8 / peak))])
+                line.append("  ").append("".join(blocks).rjust(plot_width), color)
+            lines.append(line)
+        self.update_text(identifier, Text("\n", no_wrap=True, overflow="ellipsis").join(lines))
+
+    def draw_filesystems(self):
+        width = self.query_one("#filesystems", Static).content_size.width
+        if not width:
+            return
+        capacity_width, percent_width, gap = 10, 6, 2
+        capacity_columns = (("used", self.t("已用", "Used")), ("free", self.t("剩餘", "Free")),
+                            ("total", self.t("總計", "Total")))
+        available = width - percent_width - gap
+        column_width = capacity_width + gap
+        if available < 10 + 3 * column_width:
+            capacity_columns = capacity_columns[1:2] if available >= 6 + column_width else ()
+        mount_width = max(1, available - len(capacity_columns) * column_width)
+        if len(capacity_columns) == 3:
+            mount_width = min(16, mount_width)
+        bar_width = available - mount_width - len(capacity_columns) * column_width - 1
+
+        heading = Text(self.t("掛載點", "Mount"), style=MUTED)
+        heading.truncate(mount_width, overflow="ellipsis", pad=True)
+        for _, label in capacity_columns:
+            cell = Text(label, style=MUTED)
+            cell.align("right", capacity_width)
+            heading.append(" " * gap).append_text(cell)
+        lines = [aligned(heading, Text(self.t("使用率", "Usage"), style=MUTED), width)]
+        for disk in self.snapshot["disks"]:
+            row = Text(clean(disk["mountpoint"]))
+            error = Text(self.status(disk.get("error")), style=MUTED)
+            if error:
+                error_mount_width = min(mount_width, max(3, width - gap - error.cell_len))
+                row.truncate(error_mount_width, overflow="ellipsis", pad=True)
+                row.append(" " * gap).append_text(error)
+                row.truncate(width, overflow="ellipsis")
+            else:
+                row.truncate(mount_width, overflow="ellipsis", pad=True)
+                for key, _ in capacity_columns:
+                    row.append(" " * gap).append(f"{size(disk[key]):>{capacity_width}}")
+                percent = disk["percent"]
+                usage = Text(number(percent, "%"), style=MINT)
+                if percent is not None and bar_width >= 4:
+                    usage = Text.assemble(meter(percent, bar_width, MINT), " ", usage)
+                aligned(row, usage, width)
+            lines.append(row)
+        self.update_block("filesystems", Text("\n", no_wrap=True, overflow="ellipsis").join(lines))
+
     def draw_summary(self):
         data = self.snapshot
         cpu, memory = data["cpu"], data["memory"]
-        width = max(20, self.query_one("#summary-cpu").content_size.width)
+        cpu_card = self.query_one("#summary-cpu")
+        cpu_card.border_subtitle = f"{number(cpu['frequency_mhz'], digits=0)} MHz"
+        width = max(20, cpu_card.content_size.width)
         self.update_text("summary-cpu", Text.assemble(
             metric(cpu["percent"], self.cpu_history, width, CYAN),
             "\n", (self.t("溫度 ", "Temp "), MUTED), number(cpu["temperature"], "°C"),
             (self.t("  功率 ", "  Power "), MUTED), number(cpu["power_watts"], " W")))
         swap = memory["swap"]
-        memory_width = max(1, self.query_one("#summary-memory").content_size.width - 7)
+        memory_card = self.query_one("#summary-memory")
+        memory_card.border_subtitle = memory_speed(memory.get("speeds_mts", ()))
+        memory_width = max(1, memory_card.content_size.width - 7)
         used, shared, cached, _ = memory_segments(memory)
         used += shared or 0
         used_percent = used / memory["total"] * 100
@@ -675,7 +747,11 @@ class SystemMonitorApp(App):
                 grid.append(("─" * max(1, width // columns - 2) + "  ") * columns + "\n", style="#263440")
         if not indices:
             grid = Text(self.t("沒有符合條件的核心", "No matching cores"), style=MUTED)
-        load = Text("Load " + "  ".join(f"{v:.2f}" for v in cpu["load"])) if cpu["load"] else Text()
+        load = Text()
+        if self.size.height < 32:
+            load.append(f"{number(cpu['frequency_mhz'], digits=0)} MHz", CYAN)
+        if cpu["load"]:
+            load.append("  " if load else "").append("Load " + "  ".join(f"{v:.2f}" for v in cpu["load"]))
         footer = aligned(load,
                          Text(f"user {number(cpu['times']['user'], '%')}  sys {number(cpu['times']['system'], '%')}  iowait {number(cpu['times']['iowait'], '%')}", style=MUTED),
                          self.query_one("#core-footer").content_size.width)
@@ -715,6 +791,10 @@ class SystemMonitorApp(App):
             usage = metric(gpu["utilization"], history, width, AMBER)
             memory_text = (self.t("共用系統 RAM", "Shared system RAM") if gpu.get("memory_shared") else
                            f"{size(gpu['memory_used'])} / {size(gpu['memory_total'])}")
+            clocks = Text.assemble((self.t("核心 ", "Core "), MUTED), number(gpu.get("frequency_mhz"), " MHz", 0))
+            if not gpu.get("memory_shared"):
+                vram = Text.assemble((self.t("顯存 ", "VRAM "), MUTED), number(gpu.get("memory_frequency_mhz"), " MHz", 0))
+                clocks.append("  " if clocks.cell_len + vram.cell_len + 2 <= width else "\n").append_text(vram)
             if not compact:
                 memory_label = self.t("記憶體", "Memory") if gpu.get("memory_shared") else self.t("顯存", "VRAM")
                 headers = ("GPU%", memory_label, self.t("溫度", "Temp"),
@@ -725,7 +805,7 @@ class SystemMonitorApp(App):
                 widths = (6, 23, 7, 10, 7, 13)
                 extra = max(0, width - sum(widths) - 10) // len(widths)
                 metrics = text_table(headers, [values], [size + extra for size in widths])
-                elements.extend([title, usage, metrics, Text("")])
+                elements.extend([title, usage, clocks, metrics, Text("")])
                 continue
             memory_percent = (gpu["memory_used"] / gpu["memory_total"] * 100) if gpu["memory_total"] and gpu["memory_used"] is not None else None
             memory = Text.assemble((self.t("顯存  ", "VRAM  "), MUTED), f"{size(gpu['memory_used'])} / {size(gpu['memory_total'])}\n", meter(memory_percent, width, AMBER))
@@ -735,7 +815,7 @@ class SystemMonitorApp(App):
                                  [[Text(number(gpu[key], unit, 0), style="bold") for key, unit in
                                    (("temperature", "°C"), ("power_watts", " W"), ("fan_percent", "%"))]],
                                  [(width - 4) // 3] * 3)
-            elements.extend([title, usage, memory, Text(""), metrics])
+            elements.extend([title, usage, memory, clocks, metrics])
             if len(self.snapshot["gpus"]) > 1 or not gpu.get("processes_supported", True):
                 elements.append(Text(""))
                 continue
@@ -856,6 +936,7 @@ class SystemMonitorApp(App):
 
     def draw_storage(self):
         data = self.snapshot
+        self.draw_disk_throughput("storage-disk-throughput", detail=True)
         processes = data.get("network_processes", [])
         scope = data.get("network_process_scope", "tcp_udp" if SYSTEM == "Windows" else "tcp")
         protocols = "TCP+UDP" if scope in ("packet", "tcp_udp") else "TCP"
@@ -897,6 +978,7 @@ class SystemMonitorApp(App):
                            ("cache_l2", "L2 Cache"), ("cache_l3", "L3 Cache"), ("driver_version", self.t("NVIDIA 驅動", "NVIDIA driver"))):
             table.add_row(label, Text(clean(data["hardware"].get(key) or "—")))
         table.add_row(self.t("實體記憶體", "Total memory"), size(data["memory"]["total"]))
+        table.add_row(self.t("記憶體速率", "RAM speed"), memory_speed(data["memory"].get("speeds_mts", ())))
         table.add_row(self.t("已用記憶體", "Used memory"), f"{size(data['memory']['used'])} ({data['memory']['percent']:.1f}%)")
         table.add_row(self.t("空閒記憶體", "Free memory"), size(data["memory"]["free"]))
         table.add_row(self.t("可用記憶體", "Available memory"), size(data["memory"]["available"]))

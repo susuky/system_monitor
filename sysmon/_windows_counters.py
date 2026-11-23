@@ -1,4 +1,4 @@
-"""Physical disk activity, WDDM GPU memory and CPU package power from PDH."""
+"""Physical disk activity, WDDM GPU memory and CPU telemetry from PDH."""
 
 from functools import cache
 import ctypes
@@ -6,6 +6,8 @@ from ctypes import wintypes
 import math
 import re
 import struct
+
+import psutil
 
 
 _pdh = ctypes.WinDLL("pdh.dll")
@@ -122,6 +124,11 @@ class WindowsCounters:
         self._disk = self._add(r"\PhysicalDisk(*)\% Idle Time")
         self._memory = self._add(r"\GPU Process Memory(*)\Dedicated Usage")
         self._power = self._add(r"\Energy Meter(*)\Power")
+        self._cpu_performance = self._add(r"\Processor Information(_Total)\% Processor Performance")
+        try:
+            self._nominal_mhz = psutil.cpu_freq().max
+        except (OSError, RuntimeError):
+            self._nominal_mhz = 0
 
     def _add(self, path):
         handle = wintypes.HANDLE()
@@ -131,11 +138,15 @@ class WindowsCounters:
 
     def sample(self):
         if not self._query or _pdh.PdhCollectQueryData(self._query):
-            return {}, {}, None
+            return {}, {}, None, None
+        # Windows reports achieved performance relative to the nominal frequency, including boost.
+        performance = dict(_values(self._cpu_performance)).get("_Total", 0)
+        frequency = self._nominal_mhz * performance / 100 if self._nominal_mhz > 0 and performance > 0 else None
         return (
             _disk_busy(_values(self._disk)),
             _dedicated_memory(_values(self._memory)),
             _package_power(_values(self._power)),
+            frequency,
         )
 
     def close(self):

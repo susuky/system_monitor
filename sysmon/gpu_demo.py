@@ -13,6 +13,8 @@ def sample_gpus(count: int, sample_time: float) -> list[dict]:
             "index": index, "name": f"Simulated GPU {index}",
             "uuid": f"SIMULATED-GPU-{index}", "simulated": True,
             "utilization": utilization, "memory_used": int(total * fraction),
+            "frequency_mhz": round(450 + 18 * utilization),
+            "memory_frequency_mhz": round(405 + 60 * utilization),
             "memory_total": total, "temperature": round(35 + utilization * 0.4, 1),
             "power_watts": round(30 + utilization * 2, 1), "power_limit_watts": 250,
             "fan_percent": round(15 + utilization * 0.6, 1),

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 from . import __version__
-from .formatting import number, size
+from .formatting import memory_speed, number, size
 from .settings import DEFAULT_LANGUAGE, LANGUAGES, SettingsError, load_language, save_language, translate_status
 
 
@@ -144,7 +144,8 @@ def print_snapshot(
     console.print(f"{load}{t('程序', 'Processes')} {len(snapshot['processes'])}")
     console.print(
         f"RAM {t('已用', 'Used')} {size(memory['used'])} / {size(memory['total'])} "
-        f"({number(memory['percent'], '%')})  {t('可用', 'Available')} {size(memory['available'])}"
+        f"({number(memory['percent'], '%')})  {t('可用', 'Available')} {size(memory['available'])}  "
+        f"{t('速率', 'Speed')} {memory_speed(memory.get('speeds_mts', ()))}"
     )
     console.print(
         f"{t('空閒', 'Free')} {size(memory['free'])}  "
@@ -182,6 +183,10 @@ def print_snapshot(
             f"  {gpu_memory}  "
             f"{number(gpu['temperature'], ' °C')}  {number(gpu['power_watts'], ' W')}"
         )
+        clocks = f"  {t('核心時脈', 'Core clock')} {number(gpu.get('frequency_mhz'), ' MHz', 0)}"
+        if not gpu.get("memory_shared"):
+            clocks += f"  {t('顯存時脈', 'VRAM clock')} {number(gpu.get('memory_frequency_mhz'), ' MHz', 0)}"
+        console.print(clocks)
     if snapshot["gpu_status"]:
         console.print(translate_status(snapshot["gpu_status"], language), style="dim")
 

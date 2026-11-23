@@ -92,6 +92,30 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(restricted["error"], "無權讀取")
         self.assertEqual(rows[0]["free"], 650)
 
+    @linux_only
+    def test_disk_throughput_counts_backing_devices_once(self):
+        collector = Collector.__new__(Collector)
+        collector._previous_disk, collector._disk_time = {}, None
+        names = ("sda", "nvme0n1", "sda1", "dm-0", "zram0", "loop0")
+        base = {name: SimpleNamespace(read_bytes=0, write_bytes=0) for name in names}
+        next_sample = {name: SimpleNamespace(read_bytes=10, write_bytes=20) for name in names}
+        with tempfile.TemporaryDirectory(prefix="vital-block-") as directory:
+            block = Path(directory)
+            (block / "sda1").mkdir()
+            (block / "sda1/partition").touch()
+            (block / "dm-0/slaves").mkdir(parents=True)
+            (block / "dm-0/slaves/sda1").touch()
+            with patch("sysmon.collector.Path", return_value=block), \
+                    patch("sysmon.collector.psutil.disk_io_counters", side_effect=(base, next_sample, base)), \
+                    patch("sysmon.collector.time.monotonic", side_effect=(10, 12, 14)):
+                _, initial = collector._disk_io()
+                rows, totals = collector._disk_io()
+                _, reset = collector._disk_io()
+        self.assertEqual({row["name"] for row in rows}, {"sda", "nvme0n1", "dm-0", "zram0"})
+        self.assertEqual(totals, {"read_rate": 10, "write_rate": 20})
+        self.assertEqual(initial, {"read_rate": None, "write_rate": None})
+        self.assertEqual(reset, initial)
+
     def test_gpu_demo_is_opt_in_and_skips_gpu_initialization(self):
         with patch.object(Collector, "_init_gpu") as initialize:
             collector = Collector()
@@ -250,9 +274,13 @@ class CollectorTests(unittest.TestCase):
             load.write_text("735\n")
             collector._jetson_temperature = Path(directory) / "temp"
             collector._jetson_temperature.write_text("51250\n")
+            clock = Path(directory) / "cur_freq"
+            clock.write_text("918000000\n")
             gpus, status = collector._gpus([])
             self.assertEqual(gpus[0]["utilization"], 73.5)
             self.assertEqual(gpus[0]["temperature"], 51.25)
+            self.assertEqual(gpus[0]["frequency_mhz"], 918.0)
+            self.assertIsNone(gpus[0]["memory_frequency_mhz"])
             self.assertTrue(gpus[0]["memory_shared"])
             self.assertFalse(gpus[0]["processes_supported"])
             self.assertIsNone(gpus[0]["memory_used"])
@@ -264,10 +292,12 @@ class CollectorTests(unittest.TestCase):
                 expected = {"0": 0.0, "1000": 100.0}.get(value)
                 self.assertEqual(gpus[0]["utilization"], expected)
             load.unlink()
+            clock.unlink()
             collector._jetson_temperature.unlink()
             gpus, status = collector._gpus([])
             self.assertIsNone(gpus[0]["utilization"])
             self.assertIsNone(gpus[0]["temperature"])
+            self.assertIsNone(gpus[0]["frequency_mhz"])
             self.assertIn("無法讀取 Jetson GPU 使用率", status)
 
     @linux_only
@@ -398,11 +428,13 @@ class CollectorTests(unittest.TestCase):
         collector._wsl = False
         collector._nvml = SimpleNamespace(
             NVMLError=RuntimeError, nvmlMemory_v2=2, NVML_TEMPERATURE_GPU=0,
+            NVML_CLOCK_GRAPHICS=0, NVML_CLOCK_MEM=2,
             nvmlDeviceGetCount=lambda: 1, nvmlDeviceGetHandleByIndex=lambda index: index,
             nvmlDeviceGetMemoryInfo=lambda *args: SimpleNamespace(total=1000, used=120),
             nvmlDeviceGetUtilizationRates=lambda handle: SimpleNamespace(gpu=25),
             nvmlDeviceGetPowerUsage=lambda handle: 50000,
             nvmlDeviceGetEnforcedPowerLimit=lambda handle: 100000,
+            nvmlDeviceGetClockInfo=lambda handle, clock: {0: 2625, 2: 10501}[clock],
             nvmlDeviceGetComputeRunningProcesses=lambda handle: [
                 SimpleNamespace(pid=1, usedGpuMemory=100), SimpleNamespace(pid=2, usedGpuMemory=None)],
             nvmlDeviceGetGraphicsRunningProcesses=lambda handle: [
@@ -417,6 +449,8 @@ class CollectorTests(unittest.TestCase):
             gpus, status = collector._gpus([host])
         rows = {row["pid"]: row for row in gpus[0]["processes"]}
         self.assertEqual(status, "")
+        self.assertEqual(gpus[0]["frequency_mhz"], 2625)
+        self.assertEqual(gpus[0]["memory_frequency_mhz"], 10501)
         self.assertEqual(set(rows), {1, 2, 3})
         self.assertEqual(rows[1], {
             "pid": 1, "name": "python", "type": "C+G", "device": 0,

@@ -70,6 +70,7 @@ def demo_snapshot():
             "total": 128 * GIB, "used": 40 * GIB, "available": 88 * GIB,
             "free": 56 * GIB, "cached": 30 * GIB, "buffers": 2 * GIB,
             "shared": 256 * MIB, "percent": 31.25,
+            "speeds_mts": (5600,),
             "swap": {"total": 8 * GIB, "used": 512 * MIB, "free": int(7.5 * GIB), "percent": 6.25},
         },
         "processes": [
@@ -89,6 +90,7 @@ def demo_snapshot():
             {"name": "nvme1n1", "read_rate": 164 * MIB, "write_rate": 28 * MIB,
              "read_iops": 1420, "write_iops": 326, "busy_percent": 28.4},
         ],
+        "disk_throughput": {"read_rate": 176 * MIB, "write_rate": 31 * MIB},
         "network": [
             {"name": "eth0", "up": True, "addresses": ["192.0.2.10"],
              "recv_rate": int(12.4 * MIB), "send_rate": int(2.1 * MIB),
@@ -97,6 +99,7 @@ def demo_snapshot():
         "gpus": [{
             "index": 0, "name": "NVIDIA Demo GPU", "uuid": "GPU-demo",
             "utilization": 76.0, "memory_used": 18 * GIB, "memory_total": 24 * GIB,
+            "frequency_mhz": 2625, "memory_frequency_mhz": 10501,
             "temperature": 64.0, "power_watts": 216.0, "power_limit_watts": 300.0,
             "fan_percent": 48.0,
             "processes": [
@@ -160,6 +163,8 @@ async def capture():
             for index in range(72):
                 app.cpu_history.append(data["cpu"]["percent"] + 11 * math.sin(index / 6) + 4 * math.sin(index / 2))
                 gpu_history.append(64 + 12 * math.sin(index / 8) + 5 * math.sin(index / 3))
+                app.disk_history.append(((44 + 38 * math.sin(index / 5)) * MIB,
+                                         (28 + 24 * math.sin(index / 9)) * MIB))
             app.accept_snapshot(data)
             await pilot.pause(0.5)
             assert not app.workers, "Documentation capture must not start a sampling worker"
@@ -169,6 +174,9 @@ async def capture():
             await pilot.press("4")
             await pilot.pause()
             print(save_svg(app, directory / f"gpu-{language}.svg"))
+            await pilot.press("5")
+            await pilot.pause()
+            print(save_svg(app, directory / f"storage-{language}.svg"))
 
 
 if __name__ == "__main__":

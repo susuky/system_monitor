@@ -13,3 +13,7 @@ def size(value: int | float | None) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} PiB"
+
+
+def memory_speed(speeds: tuple[int, ...] | list[int]) -> str:
+    return f"{' / '.join(map(str, speeds))} MT/s" if speeds else "—"

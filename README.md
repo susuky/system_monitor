@@ -8,11 +8,13 @@ A terminal system monitor for CPU, NVIDIA GPU, memory, processes, disks, and net
 
 ## Interface
 
-![Vital overview in English](docs/images/overview-en.png)
+![Vital overview showing clock speeds and disk throughput](docs/images/overview-en.png)
 
 Screenshots use sample data.
 
-![Vital GPU processes in English](docs/images/gpu-en.png)
+![Vital GPU core and VRAM clocks with process usage](docs/images/gpu-en.png)
+
+![Disk read and write charts with per-device I/O](docs/images/storage-en.png)
 
 <details>
 <summary>Traditional Chinese interface</summary>
@@ -21,16 +23,18 @@ Screenshots use sample data.
 
 ![Vital GPU processes in Traditional Chinese](docs/images/gpu-zh-TW.png)
 
+![Vital disk throughput in Traditional Chinese](docs/images/storage-zh-TW.png)
+
 </details>
 
 | Tab | Contents |
 | --- | --- |
-| Overview | CPU, memory, GPU, and network summaries, plus top network processes, per-core load, process search, and disk capacity |
-| CPU | Usage, user, sys, iowait, and idle time for each logical core, plus core, socket, and NUMA topology |
+| Overview | CPU, memory, GPU, and network summaries, top network processes, per-core load, process search, and disk capacity with live read and write trends |
+| CPU | CPU clock and per-core usage, user, sys, iowait, and idle time, plus core, socket, and NUMA topology |
 | Processes | Sort by CPU or memory; search by name, full command, PID, or user |
-| GPU | Usage, VRAM, temperature, power, and fan speed for each NVIDIA GPU; GPU%, CPU%, VRAM, and RAM for compute and graphics processes |
-| Disks / Network | Per-process receive and send rates, network interfaces, filesystem capacity, disk I/O and IOPS |
-| Hardware | CPU model, caches, OS version, and memory, cache, and swap details |
+| GPU | Core and VRAM clocks, usage, VRAM, temperature, power, and fan speed for each NVIDIA GPU, plus per-process GPU%, CPU%, VRAM, and RAM |
+| Disk / Network | Disk read and write charts, per-device I/O and IOPS, filesystem capacity, and network traffic by process and interface |
+| Hardware | CPU model, CPU caches, OS version, RAM transfer rate, memory usage, cache, and swap |
 
 Wide terminals display core load in multiple columns. Narrow terminals use a scrollable vertical layout. The top summaries are hidden below 32 rows; memory details remain available in the Hardware tab.
 
@@ -44,7 +48,7 @@ Run `sudo .venv/bin/vital` on Linux or WSL2 to measure TCP and UDP. A standard l
 
 - Linux (x86_64 or aarch64), WSL2, or native Windows (PowerShell 5.1 or 7). Source installs and Windows builds need Python 3.10 or later, `venv`, and `pip`; the standalone Windows executable runs without Python installed.
 - A terminal with Unicode support. The Traditional Chinese interface also needs a Chinese font.
-- Discrete NVIDIA GPUs are read through the driver's NVML library. Jetson Orin (JetPack 5) uses GPU load and temperature readings exposed by the system.
+- Discrete NVIDIA GPUs are read through the driver's NVML library. Jetson Orin (JetPack 5) uses GPU load, core clock, and temperature readings exposed by the system.
 
 On WSL2, install and run Vital inside your Linux distribution. CPU, memory, and process values describe the WSL environment. NVIDIA GPU data comes from NVML provided by the Windows driver. The GPU process list may be incomplete, and per-process GPU usage is shown as `—` to avoid mixing Windows and Linux PIDs. Per-process VRAM is also shown as `—` when the driver does not provide it, or `null` in JSON. See [NVIDIA's WSL support limitations](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported).
 
@@ -177,6 +181,8 @@ vital --json --demo-gpus 4 -i 1 -n 3
 - The memory bar separates ordinary used RAM, shared RAM, cache, and free RAM. The used total above it includes shared RAM. Cache combines buffers and reclaimable kernel cache (`SReclaimable`), with shared RAM deducted so the segments add up to total RAM.
 - Available RAM is the operating system's estimate of memory usable by new processes, shown separately. Text output, the Hardware tab, and JSON retain raw fields: used is `total - available`, raw cache includes shared RAM, and buffers are separate. These raw categories differ from the bar's segments. Unsupported memory fields on Windows appear as `—`, or `null` in JSON.
 - CPU and per-GPU history charts use a fixed 0–100% scale, showing up to 90 consecutive samples. Each GPU has its own history; scroll the GPU panel or GPU tab to see every card.
+- CPU, GPU core, and VRAM clocks use MHz. RAM transfer rates use MT/s. An unavailable RAM rate appears as `—`, with an empty `memory.speeds_mts` array in JSON.
+- Disk read and write charts show total throughput across devices. The two traces share a scale based on the peak in the visible samples. Vital keeps up to 90 samples.
 - Process CPU usage treats one logical core as 100%, so multithreaded processes can exceed 100%. Overall and per-core busy percentages exclude idle and iowait.
 - On Linux, CPU temperature comes from hardware sensors. CPU power comes from changes in RAPL package energy counters.
 - Per-process GPU% comes from recent NVML SM utilization samples. It is shown as `—` when no recent sample is available or the hardware does not support it. VRAM percentage is the process's share of the GPU's total VRAM; process RAM is RSS.

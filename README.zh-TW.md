@@ -8,11 +8,13 @@ Vital 是 Linux 和 Windows 的終端機系統監視器，同時顯示 CPU、NVI
 
 ## 介面
 
-![Vital 繁體中文概覽](docs/images/overview-zh-TW.png)
+![Vital 概覽的時脈、記憶體速率與磁碟讀寫](docs/images/overview-zh-TW.png)
 
 畫面使用範例資料。
 
-![Vital GPU 程序](docs/images/gpu-zh-TW.png)
+![Vital GPU 核心與顯存時脈及各程序用量](docs/images/gpu-zh-TW.png)
+
+![磁碟讀寫圖表與各裝置的 I/O 明細](docs/images/storage-zh-TW.png)
 
 <details>
 <summary>English interface</summary>
@@ -21,16 +23,18 @@ Vital 是 Linux 和 Windows 的終端機系統監視器，同時顯示 CPU、NVI
 
 ![Vital GPU processes](docs/images/gpu-en.png)
 
+![Vital disk throughput](docs/images/storage-en.png)
+
 </details>
 
 | 分頁 | 內容 |
 | --- | --- |
-| 概覽 | CPU／記憶體／GPU／網路摘要與程序流量排行、逐核心負載、程序搜尋與磁碟容量 |
-| CPU | 每個邏輯核心的使用率、user、sys、iowait、idle，以及 Core／Socket／NUMA 拓撲 |
+| 概覽 | CPU／記憶體／GPU／網路摘要、程序流量排行、逐核心負載、程序搜尋，以及磁碟容量和即時讀寫趨勢 |
+| CPU | CPU 時脈、每個邏輯核心的使用率、user、sys、iowait、idle，以及 Core／Socket／NUMA 拓撲 |
 | 程序 | 依 CPU 或記憶體排序，搜尋名稱、完整指令、PID 或使用者 |
-| GPU | 各張 NVIDIA GPU 的使用率、顯存、溫度、功率、風扇，以及運算／圖形程序的 GPU%、CPU%、顯存與主記憶體 |
-| 磁碟／網路 | 逐程序收發速率、網路介面流量、掛載點容量、磁碟讀寫速率與 IOPS |
-| 硬體 | CPU 型號、快取、系統版本，以及記憶體、Cache 與 Swap 明細 |
+| GPU | 各張 NVIDIA GPU 的核心與顯存時脈、使用率、顯存、溫度、功率與風扇，以及各程序的 GPU%、CPU%、顯存與主記憶體 |
+| 磁碟／網路 | 磁碟讀寫圖表、各裝置的 I/O 與 IOPS、掛載點容量，以及逐程序與介面的網路流量 |
+| 硬體 | CPU 型號與快取、系統版本、RAM 傳輸速率，以及記憶體用量、Cache 與 Swap |
 
 寬視窗會把核心負載排列成多欄；窄視窗改成可捲動的直向布局。低於 32 行時收起頂部摘要，記憶體明細仍可在「硬體」頁查看。
 
@@ -44,7 +48,7 @@ Linux 和 WSL2 用 `sudo .venv/bin/vital` 量測 TCP 和 UDP，一般權限可�
 
 - Linux（x86_64／aarch64）、WSL2 或原生 Windows（PowerShell 5.1 或 7）。從原始碼安裝或打包 Windows 版需要 Python 3.10 以上及 `venv`、`pip`；獨立的 Windows 執行檔不需另外安裝 Python。
 - 可顯示 Unicode 的終端機；繁中介面需要中文字型。
-- 獨立 NVIDIA GPU 透過驅動程式的 NVML 讀取；Jetson Orin（JetPack 5）直接讀取系統提供的 GPU 負載與溫度。
+- 獨立 NVIDIA GPU 透過驅動程式的 NVML 讀取。Jetson Orin（JetPack 5）直接讀取系統提供的 GPU 負載、核心時脈與溫度。
 
 WSL2 請在 Linux 發行版內安裝與執行；CPU、記憶體與程序數值來自 WSL 環境。NVIDIA GPU 透過 Windows 驅動程式提供的 NVML 讀取。WSL 的 GPU 程序清單可能不完整；逐程序 GPU 使用率顯示 `—`，避免混用 Windows 與 Linux PID。驅動程式未提供的逐程序顯存也顯示 `—`，JSON 為 `null`。參閱 [NVIDIA 的 WSL 支援範圍](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported)。
 
@@ -177,6 +181,8 @@ vital --json --demo-gpus 4 -i 1 -n 3
 - 記憶體條以不同顏色顯示一般已用、Shared、Cache 與空閒；頂端已用量包含 Shared 記憶體。Cache 合併 Buffers 與可回收核心快取（SReclaimable），並扣除已單獨顯示的 Shared，讓色塊加總等於實體 RAM。
 - 可用量（available）是作業系統估計可供新程序使用的 RAM，另行顯示。文字、硬體頁與 JSON 保留原始欄位；其中已用為 `total - available`，原始 cache 包含 Shared、Buffers 另列，因此與記憶體條的分類不同。Windows 不提供的記憶體欄位顯示 `—`，JSON 為 `null`。
 - CPU 與每張 GPU 的歷史圖固定為 0–100%，依取樣順序連續顯示，最多保留 90 筆。多張 GPU 各有獨立歷史；在 GPU 區塊或 GPU 頁捲動可查看所有卡片。
+- CPU、GPU 核心與顯存時脈用 MHz 表示，RAM 傳輸速率用 MT/s。讀不到 RAM 速率時，介面顯示 `—`，JSON 的 `memory.speeds_mts` 為空陣列。
+- 磁碟圖表顯示各裝置合計的讀寫速度。兩條趨勢以畫面上的最高讀值共用同一刻度，最多保留 90 筆取樣。
 - 程序 CPU 使用率以單一邏輯核心為 100%，多執行緒程序可超過 100%；整體 CPU 與各核心的忙碌百分比不含 idle、iowait。
 - Linux 的 CPU 溫度來自硬體感測器，CPU 功率由 RAPL 封裝能耗差值算出。
 - GPU 程序的 GPU% 來自 NVML 最近的 SM 使用率樣本；沒有近期樣本或硬體不支援時顯示 `—`。顯存百分比為該程序占整張卡顯存總量的比例，主記憶體為 RSS。

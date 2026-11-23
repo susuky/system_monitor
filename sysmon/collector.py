@@ -24,6 +24,7 @@ if psutil.WINDOWS:
     from ._windows_network import WindowsProcessNetwork as ProcessNetwork
 else:
     import pwd
+    from . import _linux_memory
     from ._linux_network import LinuxProcessNetwork as ProcessNetwork
 
 
@@ -189,6 +190,7 @@ class Collector:
         if demo_gpus < 0:
             raise ValueError("demo_gpus must be nonnegative")
         self.hardware = _hardware()
+        self._memory_speeds = _windows.memory_speeds() if psutil.WINDOWS else _linux_memory.memory_speeds()
         kernel = self.hardware["kernel"].lower()
         self._wsl = "microsoft" in kernel or "wsl" in kernel
         self.hostname = socket.gethostname()
@@ -338,7 +340,7 @@ class Collector:
                     continue
         return max(readings) if readings else None
 
-    def _cpu(self, windows_power: float | None = None) -> dict:
+    def _cpu(self, windows_power: float | None = None, windows_frequency: float | None = None) -> dict:
         # Read aggregate, IDs and counters together so CPU hotplug cannot
         # pair one core's counters with another core's identity.
         total, cores = _windows.cpu_times() if psutil.WINDOWS else _read_cpu_times()
@@ -349,16 +351,18 @@ class Collector:
             for core_id in core_ids
         ]
         self._previous_cpu, self._previous_cores = total, cores
-        try:
-            frequency = psutil.cpu_freq()
-        except (OSError, NotImplementedError):
-            frequency = None
         if psutil.WINDOWS:
             temperature, power = _windows.cpu_temperature(), windows_power
+            frequency = windows_frequency
             power_status = ""
             if power is None:
                 power_status = "等待下一次取樣" if percent is None else "系統未提供 CPU 功耗感測器"
         else:
+            try:
+                reading = psutil.cpu_freq()
+                frequency = reading.current if reading and reading.current > 0 else None
+            except (OSError, NotImplementedError):
+                frequency = None
             temperature = self._cpu_temperature()
             power, power_status = self._cpu_power()
         return {
@@ -366,14 +370,13 @@ class Collector:
             "core_ids": core_ids,
             "times": times, "per_core_times": [row[1] for row in core_results],
             "logical": len(cores) or psutil.cpu_count() or 1, "physical": self._physical,
-            "frequency_mhz": frequency.current if frequency else None,
+            "frequency_mhz": frequency,
             "load": None if psutil.WINDOWS else list(os.getloadavg()),
             "temperature": temperature,
             "power_watts": power, "power_status": power_status,
         }
 
-    @staticmethod
-    def _memory() -> dict:
+    def _memory(self) -> dict:
         memory = psutil.virtual_memory()
         try:
             swap = psutil.swap_memory()
@@ -388,6 +391,7 @@ class Collector:
             # psutil's Linux cached field already includes SReclaimable.
             "cached": getattr(memory, "cached", None), "buffers": getattr(memory, "buffers", None),
             "shared": getattr(memory, "shared", None), "percent": memory.percent,
+            "speeds_mts": self._memory_speeds,
             "swap": {key: getattr(swap, key, None) for key in ("total", "used", "free", "percent")},
         }
 
@@ -488,13 +492,14 @@ class Collector:
             rows.append(row)
         return sorted(rows, key=lambda row: (row["mountpoint"] != "/", row["mountpoint"]))
 
-    def _disk_io(self, windows_busy: dict[str, float] | None = None) -> list[dict]:
+    def _disk_io(self, windows_busy: dict[str, float] | None = None) -> tuple[list[dict], dict]:
         counters = psutil.disk_io_counters(perdisk=True, nowrap=False) or {}
         now = time.monotonic()
         elapsed = now - self._disk_time if self._disk_time is not None else None
-        rows = []
+        rows, whole_devices = [], []
         for name, counter in counters.items():
-            if not psutil.WINDOWS and (name.startswith(("loop", "ram")) or (Path("/sys/class/block") / name / "partition").exists()):
+            block = Path("/sys/class/block") / name
+            if not psutil.WINDOWS and (name.startswith(("loop", "ram")) or (block / "partition").exists()):
                 continue
             previous = self._previous_disk.get(name)
             row = {"name": name}
@@ -512,8 +517,15 @@ class Collector:
             if windows_busy is not None:
                 row["busy_percent"] = windows_busy.get(name)
             rows.append(row)
+            # Stacked volumes already contribute I/O through their underlying disks.
+            if psutil.WINDOWS or (not name.startswith("zram") and not any((block / "slaves").glob("*"))):
+                whole_devices.append(row)
         self._previous_disk, self._disk_time = counters, now
-        return rows
+        totals = {}
+        for key in ("read_rate", "write_rate"):
+            rates = [row[key] for row in whole_devices]
+            totals[key] = sum(rates) if rates and None not in rates else None
+        return rows, totals
 
     def _network(self) -> list[dict]:
         counters = psutil.net_io_counters(pernic=True, nowrap=False)
@@ -640,6 +652,8 @@ class Collector:
                 "index": index, "name": _text(name) if name else f"GPU {index}",
                 "uuid": _text(uuid) if uuid else "",
                 "utilization": utilization.gpu if utilization else None,
+                "frequency_mhz": query(nvml.nvmlDeviceGetClockInfo, handle, nvml.NVML_CLOCK_GRAPHICS),
+                "memory_frequency_mhz": query(nvml.nvmlDeviceGetClockInfo, handle, nvml.NVML_CLOCK_MEM),
                 "memory_used": memory.used if memory else None,
                 "memory_total": memory.total if memory else None,
                 "temperature": query(nvml.nvmlDeviceGetTemperature, handle, nvml.NVML_TEMPERATURE_GPU),
@@ -654,7 +668,7 @@ class Collector:
 
     def _jetson_gpus(self) -> tuple[list[dict], str]:
         # Orin's nvgpu driver exposes load in per-mille, without NVML.
-        utilization, temperature = None, None
+        utilization, temperature, frequency = None, None, None
         status = "Jetson GPU 程序資料不可用"
         try:
             load = int((self._jetson_gpu / "device/load").read_text())
@@ -663,6 +677,10 @@ class Collector:
             utilization = load / 10
         except (OSError, ValueError):
             status += "；無法讀取 Jetson GPU 使用率"
+        try:
+            frequency = int((self._jetson_gpu / "cur_freq").read_text()) / 1_000_000
+        except (OSError, ValueError):
+            pass
         if self._jetson_temperature is not None:
             try:
                 temperature = int(self._jetson_temperature.read_text()) / 1000
@@ -671,6 +689,7 @@ class Collector:
         return [{
             "index": 0, "name": "NVIDIA Orin GPU", "uuid": "",
             "utilization": utilization, "temperature": temperature,
+            "frequency_mhz": frequency, "memory_frequency_mhz": None,
             "memory_shared": True, "memory_used": None, "memory_total": None,
             "power_watts": None, "power_limit_watts": None, "fan_percent": None,
             "processes": [], "processes_supported": False,
@@ -678,8 +697,10 @@ class Collector:
 
     def sample(self) -> dict:
         timestamp = time.time()
-        busy, vram, power = self._windows_counters.sample() if self._windows_counters is not None else (None, None, None)
-        cpu, memory = self._cpu(power), self._memory()
+        busy, vram, power, frequency = (
+            self._windows_counters.sample() if self._windows_counters is not None else (None, None, None, None)
+        )
+        cpu, memory = self._cpu(power, frequency), self._memory()
         network = self._network()
         # Take the Windows event cutoff before enumerating names for these PIDs.
         windows_traffic = self._process_network.sample(()) if psutil.WINDOWS else None
@@ -696,11 +717,12 @@ class Collector:
             gpus, gpu_status = sample_gpus(self._demo_gpus, timestamp), "Simulated GPU source"
         else:
             gpus, gpu_status = self._gpus(processes, vram)
+        disk_io, disk_throughput = self._disk_io(busy)
         return {
             "timestamp": timestamp, "hostname": self.hostname,
             "uptime": max(0.0, timestamp - self._boot_time),
             "cpu": cpu, "memory": memory, "processes": processes,
-            "disks": self._disks(), "disk_io": self._disk_io(busy),
+            "disks": self._disks(), "disk_io": disk_io, "disk_throughput": disk_throughput,
             "network": network, "gpus": gpus, "gpu_status": gpu_status,
             "network_processes": network_processes, "network_process_status": network_status,
             "network_process_scope": self._process_network.scope,

@@ -157,6 +157,40 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(app.snapshot["timestamp"], started + 7)
             self.assertEqual(len(app.gpu_history[snapshot["gpus"][0]["uuid"]]), 6)
 
+    async def test_clocks_and_disk_trends_fit_overview_and_storage(self):
+        app = DemoApp(language="en")
+        async with app.run_test(size=(160, 44)) as pilot:
+            snapshot = demo_snapshot()
+            app.accept_snapshot(snapshot)
+            end = deepcopy(snapshot)
+            end["timestamp"] += app.interval
+            end["disk_throughput"] = {"read_rate": 0, "write_rate": 64 * 1024**2}
+            app.accept_snapshot(end)
+            await pilot.pause()
+            visible = "".join(ET.fromstring(app.export_screenshot()).itertext())
+            for value in ("3600", "5600", "2625", "10501"):
+                self.assertIn(value, visible)
+            overview = app.query_one("#overview-disk-throughput")
+            self.assertRegex(overview.content.plain, r"Read\s+0\.0 B/s\s+█·")
+            self.assertRegex(overview.content.plain, r"Write\s+64\.0 MiB/s\s+▁▃")
+            self.assertTrue(all(line.cell_len <= overview.content_size.width for line in overview.content.split("\n")))
+            await pilot.press("space", "5")
+            app.accept_snapshot({**end, "timestamp": end["timestamp"] + app.interval,
+                                 "disk_throughput": {"read_rate": None, "write_rate": None}})
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            detail = app.query_one("#storage-disk-throughput")
+            self.assertIn("0–176.0 MiB/s", detail.content.plain)
+            self.assertIn("64.0 MiB/s", detail.content.plain)
+            self.assertTrue(all(line.cell_len <= detail.content_size.width for line in detail.content.split("\n")))
+            self.assertEqual(len(app.disk_history), 2)
+            await pilot.press("space")
+            self.assertRegex(detail.content.plain, r"Read\s+—")
+            self.assertRegex(detail.content.plain, r"Write\s+—")
+            self.assertEqual(len(app.disk_history), 3)
+            await pilot.press("4")
+            self.assertIn("Core 2625 MHz  VRAM 10501 MHz", app.query_one("#gpu-detail").content.plain)
+
     async def test_network_summary_shows_selected_interfaces_and_two_processes(self):
         app = DemoApp(language="en")
         async with app.run_test(size=(160, 44)) as pilot:
@@ -256,8 +290,9 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("共用", memory.content.plain)
                 await pilot.press("l")
             filesystems = app.query_one("#filesystems")
-            self.assertIn("Used / Free / Total", filesystems.content.plain)
-            self.assertIn("384.0 GiB / 640.0 GiB / 1.0 TiB", filesystems.content.plain)
+            heading, root, *_ = filesystems.content.plain.splitlines()
+            self.assertEqual(heading.split(), ["Mount", "Used", "Free", "Total", "Usage"])
+            self.assertRegex(root, r"^/ {2,}384\.0 GiB {2,}640\.0 GiB {2,}1\.0 TiB {2,}37\.5%$")
             self.assertTrue(all(line.cell_len <= filesystems.content_size.width for line in filesystems.content.split("\n")))
             panel = app.query_one("#filesystem-panel")
             panel.focus()
@@ -280,7 +315,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             visible = "".join(ET.fromstring(app.export_screenshot()).itertext()).replace("\u00a0", " ")
             self.assertIn("Free memory", visible)
 
-    async def test_compact_disk_summary_keeps_drive_and_capacity_on_one_line(self):
+    async def test_compact_disk_summary_aligns_free_space_and_usage_when_resized(self):
         app = DemoApp(language="zh-TW")
         async with app.run_test(size=(124, 30)) as pilot:
             snapshot = demo_snapshot()
@@ -289,14 +324,26 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                  "total": 1.8 * 1024**4, "percent": 90.3},
                 {"mountpoint": "D:\\", "used": 1.8 * 1024**4, "free": 1.9 * 1024**4,
                  "total": 3.6 * 1024**4, "percent": 48.7},
+                {"mountpoint": "/media/外接硬碟/備份資料", "used": None, "free": None,
+                 "total": None, "percent": None, "error": "無法讀取檔案系統"},
             ]
             app.accept_snapshot(snapshot)
-            await pilot.pause()
+            await pilot.press("space")
             filesystems = app.query_one("#filesystems")
-            header, c_drive, d_drive = filesystems.content.plain.splitlines()
-            self.assertEqual(header, "已用 / 剩餘 / 總計")
-            self.assertEqual(c_drive.split(), ["C:\\", "1.6TiB/181.3GiB/1.8TiB", "90.3%"])
-            self.assertEqual(d_drive.split(), ["D:\\", "1.8TiB/1.9TiB/3.6TiB", "48.7%"])
+            for width, height in ((124, 30), (198, 44), (110, 30)):
+                await pilot.resize_terminal(width, height)
+                await pilot.pause()
+                lines = filesystems.content.split("\n")
+                self.assertTrue(all(line.cell_len <= filesystems.content_size.width for line in lines))
+                self.assertIn("無法讀取檔案系統", lines[3].plain)
+                if width == 198:
+                    self.assertEqual(lines[0].plain.split(), ["掛載點", "已用", "剩餘", "總計", "使用率"])
+                    self.assertRegex(lines[1].plain, r"^C:\\ {2,}1\.6 TiB {2,}181\.3 GiB {2,}1\.8 TiB {2,}90\.3%$")
+                else:
+                    self.assertEqual(lines[0].plain.split(), ["掛載點", "剩餘", "使用率"])
+                    self.assertRegex(lines[1].plain, r"^C:\\ {2,}181\.3 GiB {2,}90\.3%$")
+                    self.assertRegex(lines[2].plain, r"^D:\\ {2,}1\.9 TiB {2,}48\.7%$")
+                    self.assertEqual(lines[1].plain.index("GiB"), lines[2].plain.index("TiB"))
 
     async def test_paused_jetson_gpu_resizes_without_a_process_table(self):
         app = DemoApp(language="en")

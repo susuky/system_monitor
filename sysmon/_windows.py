@@ -12,6 +12,8 @@ import winreg
 
 import psutil
 
+from ._smbios import memory_speeds as _smbios_memory_speeds
+
 
 CpuTimes = namedtuple("CpuTimes", "user system idle irq softirq")
 
@@ -100,6 +102,24 @@ def hardware():
         "cache_l2": None, "cache_l3": None, "driver_version": None, "topology": [],
         **_topology(),
     }
+
+
+def memory_speeds() -> tuple[int, ...]:
+    """Read the configured RAM transfer rates from the Windows firmware table."""
+    query = ctypes.WinDLL("kernel32").GetSystemFirmwareTable
+    query.argtypes = (wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD)
+    query.restype = wintypes.UINT
+    provider = int.from_bytes(b"RSMB", "big")
+    length = query(provider, 0, None, 0)
+    if length < 8:
+        return ()
+    buffer = ctypes.create_string_buffer(length)
+    if query(provider, 0, buffer, length) != length:
+        return ()
+    size, = struct.unpack_from("<I", buffer, 4)
+    if size > length - 8:
+        return ()
+    return _smbios_memory_speeds(buffer[8:8 + size])
 
 
 class _UnicodeString(ctypes.Structure):
